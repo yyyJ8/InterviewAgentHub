@@ -1,0 +1,30 @@
+# LLM (DeepSeek V4 Pro via OpenAI-compatible API)
+openai>=1.30.0
+
+# Orchestration
+langgraph>=0.2.0
+langgraph-checkpoint>=0.1.0
+
+# MCP Protocol
+mcp>=1.0.0
+httpx>=0.27.0
+
+# Vector DB (long-term memory)
+chromadb>=0.5.0
+
+# Data validation
+pydantic>=2.0.0
+
+# File parsing (JD / Resume)
+pdfplumber>=0.10.0
+python-docx>=1.1.0
+
+# Web (Gateway + UI)
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+streamlit>=1.30.0
+
+# Utilities
+python-dotenv>=1.0.0
+typer>=0.9.0
+rich>=13.0.0
