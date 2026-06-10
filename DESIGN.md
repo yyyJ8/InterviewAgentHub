@@ -9,11 +9,14 @@
 ## 1. 核心链路
 
 ```
-上传 JD（PDF/DOCX/文本）
-   +
-上传简历（PDF/DOCX/文本）
+上传 JD + 简历（PDF/DOCX）
+        ↓
+   tools/pdf_parser.py 或 tools/docx_parser.py
+   （统一在入口层解析为纯文本）
         ↓
    JD 解析 Agent     简历分析 Agent
+   (调 jd_server.    (调 resume_server.
+    parse_jd)         parse_resume)
    （提取技能/经验/   （提取候选人画像）
     岗位要求）
         ↓                ↓
@@ -43,18 +46,18 @@
 
 | 项目 | 内容 |
 |---|---|
-| 输入 | JD 文件（PDF/DOCX/TXT），同样走解析管道提取纯文本 |
+| 输入 | JD 纯文本（PDF/DOCX 在入口层由 `tools/pdf_parser.py` / `tools/docx_parser.py` 统一解析为文本后传入） |
 | 输出 | 结构化 JD（JSON）：岗位名称、必备技能（weight 权重）、加分技能、经验年限、学历要求、软技能要求 |
-| 调用的工具 | 无（纯 LLM 提取） |
+| 调用的工具 | `jd_server.parse_jd(text)` — 调 MCP Server 封装的 LLM 提取能力 |
 | 关键点 | 技能要带权重，否则后续匹配没有依据 |
 
 ### 2.2 简历分析 Agent
 
 | 项目 | 内容 |
 |---|---|
-| 输入 | 简历文件（PDF/DOCX/TXT），通过 pdfplumber / python-docx 解析为文本后再送入 LLM |
+| 输入 | 简历纯文本（PDF/DOCX 在入口层由 `tools/pdf_parser.py` / `tools/docx_parser.py` 统一解析为文本后传入） |
 | 输出 | 候选人画像（JSON）：姓名、技能列表及熟练度、工作经历（公司/时长/职责）、项目经历、学历 |
-| 调用的工具 | 无（纯 LLM 提取） |
+| 调用的工具 | `resume_server.parse_resume(text)` — 调 MCP Server 封装的 LLM 提取能力 |
 | 关键点 | 输出格式要和 JD 解析结果对齐，方便做匹配 |
 
 ### 2.3 面试官 Agent（最复杂）
@@ -112,8 +115,8 @@ Tools:
 
 ```
 Tools:
-  - generate_questions(jd: StructuredJD, skill: str, difficulty: str, count: int) -> list[Question]
-    # 核心方法：LLM 根据 JD 实时出题，保证题目与岗位高度相关
+  - generate_questions(jd: StructuredJD, skill: str, difficulty: str, count: int, max_tokens: int = 512) -> list[Question]
+    # 核心方法：LLM 根据 JD 实时出题，count 默认 1-2，max_tokens 控制每道题输出长度（防止 Token 失控）
   - search_seed_bank(skill: str, difficulty: str, count: int) -> list[Question]
     # 从种子题库检索（RAG），作为补充
   - add_to_seed_bank(question: Question) -> bool
@@ -225,7 +228,7 @@ class RoundState(TypedDict):
     candidate_answer: str
     judgment: str                # 对回答的评价
     score: float                 # 本轮单项得分
-    next_suggestion: str         # "deepen" | "clarify" | "move_on" | "end"
+    # 下一轮方向决策统一由 InterviewState.next_action 管理，不在轮次中单独存储
 ```
 
 ---
@@ -374,11 +377,12 @@ interview_hub/
 │   └── text_cleaner.py      # 文本预处理
 │
 ├── prompts/
-│   ├── jd_parser.md         # JD 解析 prompt 模板
-│   ├── resume_analyzer.md   # 简历分析 prompt
-│   ├── interviewer.md       # 面试官 system prompt
-│   ├── judge.md             # 答案评判 prompt
-│   └── feedback.md          # 评分报告 prompt
+│   ├── __init__.py            # 加载器：按文件名读取 .md 模板，返回字符串
+│   ├── jd_parser.md           # JD 解析 prompt 模板
+│   ├── resume_analyzer.md     # 简历分析 prompt
+│   ├── interviewer.md         # 面试官 system prompt
+│   ├── judge.md               # 答案评判 prompt
+│   └── feedback.md            # 评分报告 prompt
 │
 ├── web/
 │   ├── __init__.py
@@ -432,7 +436,20 @@ Sprint 4（打磨）
 
 ---
 
-## 13. Docker 部署（虚拟机）
+## 13. 错误处理策略
+
+| 场景 | 处理方式 |
+|---|---|
+| PDF/DOCX 解析失败 | 返回明确错误提示 + 文件格式要求，要求用户重新上传 |
+| LLM 调用超时 / 异常 | 自动重试 2 次（指数退避），仍失败则跳过该轮次并记录日志 |
+| MCP Server 不可用 | Gateway 熔断，返回 503，前端展示"服务暂不可用"提示 |
+| 候选人连续空回答 | 连续 3 轮空回答/无效回答 → 自动结束面试，标记为"无效面试" |
+| 面试轮次超限 | max_rounds = 10，达到上限自动进入评分阶段 |
+| ChromaDB 连接失败 | 降级为纯内存模式（面试记录不持久化），不影响核心流程 |
+
+---
+
+## 14. Docker 部署（虚拟机）
 
 ### 容器架构
 

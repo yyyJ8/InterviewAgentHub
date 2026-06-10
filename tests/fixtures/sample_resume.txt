@@ -1,0 +1,41 @@
+姓名：张三
+学历：本科
+工作经验：6 年
+手机：138-0000-0000
+邮箱：zhangsan@example.com
+
+技能熟练度：
+- Python：熟练（6 年）
+- Django：熟练（4 年）
+- Flask：熟练（3 年）
+- MySQL：熟练（5 年）
+- Redis：熟练（3 年）
+- Go：熟悉（1 年）
+- Docker：熟练（2 年）
+- Git：熟练（6 年）
+
+项目经历：
+
+项目一：电商平台核心系统（2022-2024）
+角色：后端技术负责人
+技术栈：Python, Django, MySQL, Redis, Celery
+描述：
+- 负责电商平台订单系统的架构设计与开发
+- 使用 Django REST Framework 构建 RESTful API
+- 设计 Redis 缓存方案，提升商品查询响应速度 60%
+- 引入 Celery 异步任务处理订单超时、消息推送等场景
+
+项目二：数据分析平台（2020-2022）
+角色：Python 后端开发
+技术栈：Python, Flask, PostgreSQL, Elasticsearch
+描述：
+- 使用 Flask 开发数据可视化后端接口
+- 基于 Elasticsearch 实现日志数据的全文检索
+- 设计数据库分表方案，支撑千万级数据存储
+
+项目三：企业内部管理系统（2018-2020）
+角色：全栈开发
+技术栈：Python, Django, jQuery, MySQL
+描述：
+- 使用 Django 开发 OA 系统的审批模块
+- 实现 RBAC 权限控制模型

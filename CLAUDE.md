@@ -2,12 +2,11 @@
 
 ## 项目总览
 
-两个高级 Agent 开发项目，定位为面试作品：
+高级 Agent 开发项目，定位为面试作品：
 
-1. **迷你 Agent 框架** — 从零实现 Agent 核心循环，展示底层原理
-2. **AI 面试官** — 多 Agent 编排系统，展示应用层能力
+**AI 面试官** — 基于 LangGraph + MCP 的多 Agent 编排系统，展示应用层能力。
 
-两者互补：一个偏底层（写框架），一个偏应用（做业务）。
+> 后续计划：**迷你 Agent 框架** — 从零实现 Agent 核心循环，展示底层原理（下一项目再做）
 
 ---
 
@@ -24,41 +23,7 @@
 
 ---
 
-## 项目一：迷你 Agent 框架
-
-### 定位
-
-不依赖 LangGraph 等框架，从零手写 Agent 核心循环。展示对 Agent 原理的底层理解。
-
-### 目录结构
-
-```
-mini_framework/
-├── core/
-│   ├── agent.py          # Agent 基类（ReAct 循环）
-│   ├── llm.py            # LLM 调用封装
-│   ├── tool_registry.py  # 插件式工具注册
-│   ├── memory.py         # 短期 + 长期记忆
-│   └── orchestrator.py   # 多 Agent 编排器
-├── examples/
-│   └── calculator_agent.py
-└── tests/
-```
-
-### 核心实现思路
-
-1. **ReAct 循环**：thought → action → observation → thought... 直到 final answer
-2. **工具注册**：装饰器模式注册工具，支持动态加载
-3. **记忆系统**：短期（滑动窗口）+ 长期（向量检索）
-4. **编排器**：支持串行、并行、条件路由三种模式
-
-### 面试价值
-
-"我从零写了一个 agent 框架，LangGraph 能做的我都能做"——展示你不是框架套壳使用者。
-
----
-
-## 项目二：AI 面试官
+## 项目：AI 面试官
 
 ### 定位
 
@@ -96,18 +61,74 @@ Supervisor（LangGraph 编排）
 ## 开发顺序
 
 ```
-Phase 1（第 1 周）：迷你框架核心
-  - ReAct 循环 + LLM 调用 + 简单工具
+Phase 1（第 1 周）：MCP Server + 基础 Agent
+  - 搭建 MCP Server（JD、简历、题库）
+  - Supervisor + 2 个子 Agent
+  - 简单问→答流程跑通
 
-Phase 2（第 1-2 周）：迷你框架记忆 + 编排
-  - 短期/长期记忆 + 串行/并行编排
+Phase 2（第 1-2 周）：多轮面试流程
+  - 面试官 Agent 多轮追问
+  - 对话状态管理
+  - 全部 4 个子 Agent 完成
 
-Phase 3（第 2-3 周）：AI 面试官 MVP
-  - Supervisor + 2 个 Agent + 简单面试流程
+Phase 3（第 2-3 周）：MCP Gateway + 长期记忆
+  - MCP Gateway（注册、鉴权、限流）
+  - ChromaDB 长期记忆存储
+  - 历史面试参考能力
 
-Phase 4（第 3 周）：AI 面试官完整版
-  - 全部 Agent + 多轮追问 + 记忆 + Gateway
+Phase 4（第 3 周）：工程化 + Demo 准备
+  - Agent 行为测试
+  - Docker + 虚拟机部署
+  - Demo 脚本和面试话术准备
 ```
+
+---
+
+## 后续项目：迷你 Agent 框架
+
+> 完成 AI 面试官后开启，从零手写 Agent 核心循环，不依赖 LangGraph 等框架。
+
+### 定位
+
+展示对 Agent 原理的底层理解。与 AI 面试官互补：一个偏应用（做业务），一个偏底层（写框架）。
+
+### 目录结构
+
+```
+mini_framework/
+├── core/
+│   ├── agent.py          # Agent 基类（ReAct 循环）
+│   ├── llm.py            # LLM 调用封装
+│   ├── tool_registry.py  # 插件式工具注册（装饰器模式）
+│   ├── memory.py         # 短期（滑动窗口）+ 长期（向量检索）
+│   └── orchestrator.py   # 多 Agent 编排器（串行/并行/条件路由）
+├── examples/
+│   └── calculator_agent.py
+└── tests/
+```
+
+### 核心实现思路
+
+1. **ReAct 循环**：thought → action → observation → thought... 直到 final answer
+2. **工具注册**：装饰器模式注册工具，支持动态加载
+3. **记忆系统**：短期（滑动窗口）+ 长期（ChromaDB 向量检索）
+4. **编排器**：支持串行、并行、条件路由三种模式
+
+### 面试价值
+
+"我从零写了一个 agent 框架，LangGraph 能做的我都能做"——展示你不是框架套壳使用者。
+
+### 启动命令
+
+```bash
+# 新项目初始化
+mkdir -p mini_framework/{core,examples,tests}
+touch mini_framework/core/__init__.py
+touch mini_framework/examples/__init__.py
+touch mini_framework/tests/__init__.py
+```
+
+---
 
 ## 记忆索引
 
