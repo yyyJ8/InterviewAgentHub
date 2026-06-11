@@ -12,22 +12,35 @@ console = Console()
 
 @app.command()
 def web():
-    """启动 Streamlit Web UI"""
-    import streamlit.web.bootstrap as bootstrap
-
-    console.print("[green]🚀 启动 Web UI...[/green]")
-    bootstrap.run("web.app", "", [], {})
-
-
-@app.command()
-def gateway():
-    """启动 MCP Gateway (FastAPI)"""
+    """启动 Web UI（Gradio + FastAPI Gateway）"""
     import uvicorn
     from config import config
 
     console.print(
-        f"[green]🚀 启动 Gateway → http://{config.gateway_host}:{config.gateway_port}[/green]"
+        f"[green]🚀 启动 Gateway + Web UI → http://{config.gateway_host}:{config.gateway_port}[/green]"
     )
+    console.print(f"[dim]   Web UI: http://{config.gateway_host}:{config.gateway_port}/ui[/dim]")
+    console.print(f"[dim]   API:    http://{config.gateway_host}:{config.gateway_port}/api/v1/[/dim]")
+    console.print(f"[dim]   Health: http://{config.gateway_host}:{config.gateway_port}/health[/dim]")
+    uvicorn.run(
+        "mcp_servers.gateway:app",
+        host=config.gateway_host,
+        port=config.gateway_port,
+        reload=True,
+    )
+
+
+@app.command()
+def gateway():
+    """启动 MCP Gateway + Web UI (FastAPI + Gradio)"""
+    import uvicorn
+    from config import config
+
+    console.print(
+        f"[green]🚀 启动 Gateway + Web UI → http://{config.gateway_host}:{config.gateway_port}[/green]"
+    )
+    console.print(f"[dim]   Web UI: http://{config.gateway_host}:{config.gateway_port}/ui[/dim]")
+    console.print(f"[dim]   API:    http://{config.gateway_host}:{config.gateway_port}/api/v1/[/dim]")
     uvicorn.run(
         "mcp_servers.gateway:app",
         host=config.gateway_host,

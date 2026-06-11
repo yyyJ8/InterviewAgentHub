@@ -26,10 +26,14 @@ class Config:
     data_dir: Path = ROOT_DIR / "data"
     logs_dir: Path = ROOT_DIR / "logs"
     uploads_dir: Path = ROOT_DIR / "uploads"
+    session_dir: Path = data_dir / "sessions"
 
     # ── ChromaDB ──
     chroma_persist_dir: Path = data_dir / "chroma"
     chroma_collection_prefix: str = "ih_"
+
+    # ── Embedding ──
+    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"))
 
     # ── Interview ──
     max_rounds: int = 10
@@ -38,9 +42,16 @@ class Config:
     # ── Logging ──
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
-    # ── Server ──
+    # ── Gateway ──
     gateway_host: str = "0.0.0.0"
     gateway_port: int = 8000
+    gateway_api_key: str = field(default_factory=lambda: os.getenv("GATEWAY_API_KEY", "dev-key-change-me"))
+    gateway_require_auth: bool = not bool(os.getenv("GATEWAY_NO_AUTH", ""))  # 默认开启鉴权
+    gateway_rate_limit: int = int(os.getenv("GATEWAY_RATE_LIMIT", "60"))  # 每分钟最大请求数
+
+    # ── Feature flags ──
+    use_gateway: bool = not bool(os.getenv("NO_GATEWAY", ""))  # Web UI 是否通过 Gateway 调用
+    use_vector_memory: bool = not bool(os.getenv("NO_VECTOR_MEMORY", ""))  # 是否启用 ChromaDB 记忆
 
     def __post_init__(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)

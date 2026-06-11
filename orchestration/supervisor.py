@@ -430,3 +430,116 @@ async def judge_and_decide(state: dict, answer: str) -> dict:
     result2 = await decide_next_node(state)
     state.update(result2)
     return state
+
+
+# ── 记忆钩子（Phase 3: VectorStore 集成） ─────────────
+
+def store_interview_memory(state: dict) -> bool:
+    """面试结束时，将面试记录写入向量库 + 更新候选人画像。
+
+    在 Gateway 的 talk 端点中、面试终止时调用。
+    失败时静默降级，不抛出异常。
+    """
+    try:
+        from memory.vector_store import VectorStore
+
+        vs = VectorStore()
+        if not vs.available:
+            return False
+
+        import json
+        from models.question import RoundRecord
+
+        candidate_name = state.get("candidate_name", "匿名")
+        interview_id = state.get("interview_id", "")
+        jd = state.get("jd")
+        rounds = state.get("rounds", [])
+
+        # 1. 存储面试记录
+        rounds_json = []
+        for r in rounds:
+            if hasattr(r, "model_dump"):
+                d = r.model_dump(mode="json")
+            elif isinstance(r, dict):
+                d = r
+            else:
+                continue
+            rounds_json.append(d)
+
+        interview_doc = json.dumps({
+            "interview_id": interview_id,
+            "candidate_name": candidate_name,
+            "jd_title": jd.title if jd else "",
+            "rounds": rounds_json,
+        }, ensure_ascii=False, default=str)
+
+        vs.store_interview_session(
+            interview_doc,
+            metadata={
+                "interview_id": interview_id,
+                "candidate_name": candidate_name,
+                "jd_title": jd.title if jd else "",
+                "round_count": len(rounds),
+                "total_score": _calc_total_score(rounds),
+            },
+        )
+
+        # 2. 更新候选人画像
+        resume = state.get("resume")
+        profile_doc = json.dumps({
+            "name": candidate_name,
+            "title": resume.title if resume else "",
+            "skills": [s.model_dump() if hasattr(s, "model_dump") else s for s in (resume.skills if resume else [])],
+        }, ensure_ascii=False, default=str)
+
+        vs.update_candidate_profile(
+            candidate_name,
+            profile_doc,
+            extra_meta={
+                "last_interview_at": interview_id,
+                "interview_count": 1,  # 后续可累积
+            },
+        )
+
+        return True
+    except Exception:
+        return False
+
+
+def retrieve_candidate_history(candidate_name: str) -> list[dict]:
+    """检索候选人的历史面试记录（出题参考）。"""
+    try:
+        from memory.vector_store import VectorStore
+
+        vs = VectorStore()
+        if not vs.available:
+            return []
+        return vs.search_candidate_history(candidate_name)
+    except Exception:
+        return []
+
+
+def retrieve_similar_questions(skill: str, n: int = 3) -> list[dict]:
+    """从历史题库中检索相似题目（出题参考）。"""
+    try:
+        from memory.vector_store import VectorStore
+
+        vs = VectorStore()
+        if not vs.available:
+            return []
+        return vs.search_similar_questions(skill, n=n)
+    except Exception:
+        return []
+
+
+def _calc_total_score(rounds: list) -> float:
+    """计算面试总分（平均分）。"""
+    scores = []
+    for r in rounds:
+        if hasattr(r, "judge") and r.judge:
+            scores.append(r.judge.score)
+        elif isinstance(r, dict) and r.get("judge"):
+            scores.append(r["judge"].score)
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)

@@ -48,6 +48,10 @@ class InterviewerAgent(BaseAgent):
             difficulty=difficulty,
             intent=intent or f"考察 {target_skill} 的掌握程度",
         )
+        # Phase 3: 附带历史题库参考（可选）
+        hint = self._get_similar_questions_hint(target_skill)
+        if hint:
+            user_prompt += "\n" + hint
         question = await super().run(
             user_prompt=user_prompt,
             response_model=Question,
@@ -193,6 +197,31 @@ class InterviewerAgent(BaseAgent):
             "candidate_projects_str": candidate_projects_str or "无项目经历",
             "required_skills_str": required_skills_str or "无",
         }
+
+    def _get_similar_questions_hint(self, skill: str, n: int = 3) -> str:
+        """从历史题库检索相似题目，作为出题参考提示。静默失败。"""
+        try:
+            from memory.vector_store import VectorStore
+            from config import config
+
+            if not config.use_vector_memory:
+                return ""
+            vs = VectorStore()
+            if not vs.available:
+                return ""
+            results = vs.search_similar_questions(skill, n=n)
+            if not results:
+                return ""
+            hints = []
+            for r in results:
+                doc = r.get("document", "")
+                if doc:
+                    hints.append(f"  - {doc[:200]}")
+            if hints:
+                return "\n历史类似题目参考（避免重复，可借鉴风格）：\n" + "\n".join(hints)
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def rank_skills(jd: JD, resume: Resume) -> list[dict]:

@@ -21,12 +21,10 @@ venv/
 Thumbs.db
 .DS_Store
 
-# Logs & Uploads (runtime)
+# Logs & Uploads & Runtime data
 logs/
 uploads/
+data/chroma/
+data/sessions/
 
-# Docker (future)
-Dockerfile
-docker-compose.yml
-.dockerignore
-.env.example
+# Docker (future — files will be tracked when created)
