@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Optional
+import logging
+from typing import AsyncIterator, Optional
 
 from agents.base import BaseAgent
 from models.jd import JD
@@ -9,6 +10,8 @@ from models.question import Question, JudgeResult, Difficulty, RoundRecord
 from models.llm import LLM
 from orchestration.matcher import rank_skills
 from prompts import load_prompt
+
+logger = logging.getLogger("agents.interviewer")
 
 
 class InterviewerAgent(BaseAgent):
@@ -60,6 +63,53 @@ class InterviewerAgent(BaseAgent):
         question.skill = target_skill
         question.difficulty = Difficulty(difficulty)
         return question
+
+    async def generate_question_stream(
+        self,
+        jd: JD,
+        resume: Resume,
+        target_skill: str,
+        difficulty: str = "intermediate",
+        intent: str = "",
+    ) -> AsyncIterator[tuple[str, bool, Optional[Question]]]:
+        """流式出题：边生成边返回文字块。
+
+        每步 yield (delta_text, is_complete, question_or_none):
+        - 生成中: ("文字块", False, None)
+        - 完成:   ("", True, Question)
+
+        成功后 question.skill / question.difficulty 已自动设置。
+        失败时最后一步 yield ("", True, None)。
+        """
+        ctx = self._build_context(jd, resume)
+        user_prompt = self._interviewer_prompt_tpl.format(
+            job_title=jd.title,
+            required_skills=ctx["required_skills_str"],
+            candidate_skills=ctx["candidate_skills_str"],
+            candidate_projects=ctx["candidate_projects_str"],
+            target_skill=target_skill,
+            difficulty=difficulty,
+            intent=intent or f"考察 {target_skill} 的掌握程度",
+        )
+        # Phase 3: 附带历史题库参考
+        hint = self._get_similar_questions_hint(target_skill)
+        if hint:
+            user_prompt += "\n" + hint
+
+        try:
+            async for delta, done, result in super().run_streaming(
+                user_prompt=user_prompt,
+                response_model=Question,
+                system_prompt="你是一个专业的 AI 面试官，擅长根据候选人背景出题。",
+                temperature=0.7,
+            ):
+                if done and result is not None:
+                    result.skill = target_skill
+                    result.difficulty = Difficulty(difficulty)
+                yield (delta, done, result)
+        except Exception as e:
+            logger.error("流式出题失败: %s", e)
+            yield ("", True, None)
 
     async def generate_deepen_question(
         self,

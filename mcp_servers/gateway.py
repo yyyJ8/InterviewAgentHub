@@ -80,24 +80,79 @@ class RateLimiter:
 
 rate_limiter = RateLimiter(max_requests=config.gateway_rate_limit)
 
+
+# ── 熔断器 ──────────────────────────────────────────────
+
+class CircuitBreaker:
+    """熔断器：连续失败 N 次后打开，冷却期过后进入半开状态试探。
+
+    三态模型：
+      CLOSED    → 正常调用，失败计数
+      OPEN      → 快速失败（503），不调用实际服务
+      HALF-OPEN → 冷却期过后，允许一次试探调用
+    """
+
+    def __init__(self, name: str, failure_threshold: int = 3, cooldown_seconds: float = 30.0):
+        self.name = name
+        self._threshold = failure_threshold
+        self._cooldown = cooldown_seconds
+        self._failures = 0
+        self._last_failure_time = 0.0
+        self._total_failures = 0
+        self._total_successes = 0
+
+    @property
+    def is_open(self) -> bool:
+        """熔断器是否打开（快速失败）。"""
+        if self._failures >= self._threshold:
+            if time.time() - self._last_failure_time < self._cooldown:
+                return True
+            # 冷却期过 → 半开（重置计数，允许一次探测）
+            self._failures = 0
+        return False
+
+    def success(self):
+        """记录成功调用。"""
+        self._failures = 0
+        self._total_successes += 1
+
+    def failure(self):
+        """记录失败调用。"""
+        self._failures += 1
+        self._last_failure_time = time.time()
+        self._total_failures += 1
+
+    @property
+    def stats(self) -> dict:
+        return {
+            "name": self.name,
+            "state": "OPEN" if self.is_open else "CLOSED",
+            "consecutive_failures": self._failures,
+            "total_successes": self._total_successes,
+            "total_failures": self._total_failures,
+        }
+
+
 # ── Server 注册中心 ─────────────────────────────────────
 
 class ServerRegistry:
-    """管理 MCP Server 实例与其工具函数的映射"""
+    """管理 MCP Server 实例与其工具函数的映射（含熔断保护）。"""
 
     def __init__(self):
         self._servers: dict[str, object] = {}      # name → FastMCP instance
         self._tool_map: dict[str, callable] = {}   # tool_name → callable
+        self._breakers: dict[str, CircuitBreaker] = {}  # server_name → breaker
 
     def register(self, server, name: str):
         """注册一个 FastMCP server 实例。遍历其工具列表并注册。"""
         self._servers[name] = server
+        self._breakers[name] = CircuitBreaker(name=name)
         # FastMCP 的工具存储在 server._tool_manager._tools 中
         try:
             tools = server._tool_manager._tools
             count = 0
             for tool_name, tool_obj in tools.items():
-                self._tool_map[tool_name] = tool_obj.fn
+                self._tool_map[tool_name] = (tool_obj.fn, name)
                 logger.info("注册工具: %s → %s", tool_name, name)
                 count += 1
             logger.info("Server [%s] 注册完成，%d 个工具", name, count)
@@ -105,22 +160,43 @@ class ServerRegistry:
             logger.warning("Server [%s] 注册工具列表失败: %s", name, e)
 
     async def call_tool(self, tool_name: str, **kwargs):
-        """按工具名称路由并调用。"""
-        fn = self._tool_map.get(tool_name)
-        if fn is None:
+        """按工具名称路由并调用（含熔断保护）。"""
+        entry = self._tool_map.get(tool_name)
+        if entry is None:
             raise HTTPException(status_code=404, detail=f"工具 '{tool_name}' 未注册")
+
+        fn, server_name = entry
+        breaker = self._breakers.get(server_name)
+
+        # 熔断检查
+        if breaker is not None and breaker.is_open:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MCP Server [{server_name}] 暂时不可用（熔断保护），请稍后重试",
+            )
+
         try:
             result = fn(**kwargs)
             if asyncio.iscoroutine(result):
                 result = await result
+            if breaker is not None:
+                breaker.success()
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error("工具调用失败 [%s]: %s", tool_name, e)
+            if breaker is not None:
+                breaker.failure()
             raise HTTPException(status_code=500, detail=str(e))
 
     @property
     def tool_names(self) -> list[str]:
         return list(self._tool_map.keys())
+
+    def breaker_stats(self) -> list[dict]:
+        """返回所有熔断器状态（用于健康检查）。"""
+        return [b.stats for b in self._breakers.values()]
 
 
 registry = ServerRegistry()
@@ -140,12 +216,22 @@ def verify_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(se
 
 # ── 限流中间件 ──────────────────────────────────────────
 
+# ── 不需要限流的路径前缀 ──
+_RATE_LIMIT_SKIP_PREFIXES = (
+    "/health",
+    "/ui/assets/",
+    "/ui/static/",
+    "/ui/",
+)
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    """全局请求限流"""
+    """全局请求限流（跳过健康检查和前端静态资源）"""
     client_ip = request.client.host if request.client else "127.0.0.1"
-    # 健康检查不限流
-    if request.url.path == "/health":
+    path = request.url.path
+    # 健康检查 + Gradio 静态资源不限流
+    if path.startswith(_RATE_LIMIT_SKIP_PREFIXES):
         return await call_next(request)
     if not rate_limiter.allow(client_ip):
         return JSONResponse(
@@ -215,8 +301,9 @@ async def shutdown():
 async def health():
     return {
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "tools": registry.tool_names,
+        "breakers": registry.breaker_stats(),
     }
 
 

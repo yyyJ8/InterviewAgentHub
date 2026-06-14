@@ -43,24 +43,24 @@ def test_clean_text():
 
 
 def test_unsupported_format():
-    from tools import parse_file
+    from tools import parse_file, ParseError
 
     try:
         parse_file("test.xyz")
         assert False
-    except ValueError as e:
+    except ParseError as e:
         assert "不支持" in str(e)
     print("  [OK] test_unsupported_format 通过")
 
 
 def test_file_not_found():
-    from tools import parse_file
+    from tools import parse_file, ParseError
 
     try:
         parse_file("not_exists.pdf")
         assert False
-    except FileNotFoundError:
-        pass
+    except ParseError as e:
+        assert "不存在" in str(e)
     print("  [OK] test_file_not_found 通过")
 
 

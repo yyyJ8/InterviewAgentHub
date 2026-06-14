@@ -1,6 +1,6 @@
 # Phase 3 实现总结 — AI 面试官 MCP Gateway + 长期记忆
 
-> 对应 ROADMAP.md 第 5-6 周目标：统一 Gateway 入口（鉴权/限流/路由）、ChromaDB 长期记忆、会话持久化、Gateway↔UI 解耦
+> 对应 ROADMAP.md 第 5-6 周目标：统一 Gateway 入口（鉴权/限流/路由）、ChromaDB 长期记忆、会话持久化、Gradio 前端挂载
 
 ---
 
@@ -19,33 +19,30 @@
 ## 1. 整体架构
 
 ```
+                   浏览器 (Gradio Web UI)
+                         │
+                         │  HTTP (同进程内调用 Agent)
+                         ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                             用户界面层                                            │
-│  Streamlit Web UI (web/app.py)                                                    │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │  双模式：use_gateway=True（Gateway API） / use_gateway=False（直调 Agent）   │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │ HTTP (Gateway 模式) / 直接调用 (直调模式)
-                               ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                         Gateway 层 ★ 新增                                         │
-│  FastAPI (mcp_servers/gateway.py)                                                │
+│                         Gateway 层 ★ 核心                                          │
+│  FastAPI (:8000) — mcp_servers/gateway.py                                        │
 │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐                     │
 │  │ 鉴权中间件      │  │ 限流中间件      │  │ ServerRegistry  │                     │
 │  │ Bearer Token   │  │ 令牌桶 60/min  │  │ 工具名→Server  │                     │
 │  └────────────────┘  └────────────────┘  └────────────────┘                     │
 │                                                                                  │
-│  REST API 端点:                                                                   │
-│  POST /api/v1/interview          — 创建面试会话                                    │
-│  POST /api/v1/interview/{id}/talk — 提交回答，返回评判+下一题                       │
-│  GET  /api/v1/interview/{id}      — 获取会话状态                                   │
-│  GET  /api/v1/interview/{id}/report — 获取面试报告                                 │
-│  GET  /health                     — 健康检查                                       │
-│  POST /mcp/{tool_name}            — 通用 MCP 工具调用                              │
-│  GET  /mcp/sse                    — MCP SSE transport                             │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │ /ui                          Gradio Web UI (gr.mount_gradio_app)          │   │
+│  │ /api/v1/interview            POST  创建面试会话                           │   │
+│  │ /api/v1/interview/{id}/talk  POST  提交回答 → 评判 + 下一题               │   │
+│  │ /api/v1/interview/{id}       GET   获取会话状态                           │   │
+│  │ /api/v1/interview/{id}/report GET  获取面试报告                           │   │
+│  │ /health                      GET   健康检查                               │   │
+│  │ /mcp/{tool_name}             POST  通用 MCP 工具调用                       │   │
+│  │ /mcp/sse                     GET   MCP SSE transport                      │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
 └──────────────┬───────────────────────────────────────────────────────────────────┘
-               │ 内部调用
+               │ 内部调用（同进程，无网络开销）
                ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │                             编排层                                                │
@@ -83,8 +80,9 @@
 | 维度 | Phase 2 | Phase 3 |
 |------|---------|---------|
 | 入口 | 3 个 MCP Server 独立暴露 | **统一 Gateway** 鉴权/限流/路由 |
+| 前端 | Streamlit 独立进程 | **Gradio 挂载 FastAPI** 单进程 |
 | 记忆 | 无持久化，重启丢失 | **SessionStore** (JSON) + **VectorStore** (ChromaDB) |
-| 调用方式 | Web UI 直调 Agent | **双模式**：Gateway API（生产）/ 直调（调试） |
+| 调用方式 | Web UI 直调 Agent | Gradio → FastAPI 同进程 → Agent |
 | 出题 | 纯 LLM 生成 | LLM 生成 + **历史题库参考**（避免重复） |
 | 面试结束 | 无存储 | 自动写入 **SessionStore + VectorStore** |
 
@@ -149,15 +147,6 @@ d:\InterviewAgentHub\
 │   ├── judge.md              # — 评判 prompt
 │   └── feedback.md           # — 反馈评分 prompt
 │
-├── data/                     # 数据目录
-│   ├── seed_questions.json   # — 种子题库 12 题
-│   ├── sessions/             # — ★ SessionStore 存储目录 (Phase 3)
-│   └── chroma/               # — ★ ChromaDB 持久化目录 (Phase 3)
-│
-├── web/                      # 界面层
-│   ├── __init__.py
-│   └── app.py                # — ★ 新增 Gateway 客户端 + 双模式切换
-│
 ├── tests/                    # 测试 (24 个用例)
 │   ├── __init__.py
 │   ├── test_parse_pipeline.py
@@ -165,86 +154,106 @@ d:\InterviewAgentHub\
 │   ├── test_interviewer.py
 │   └── fixtures/
 │
-├── doc/
-│   ├── phase1-overview.md
-│   ├── phase2-overview.md
-│   └── phase3-overview.md    # ← 本文档
+├── docs/                     # 项目文档
+│   ├── DESIGN.md              # 架构设计文档
+│   ├── ROADMAP.md             # 实现路线图
+│   ├── CLAUDE.md              # 项目总览（AI 可读）
+│   ├── phase1-overview.md     # Phase 1 总结
+│   ├── phase2-overview.md     # Phase 2 总结
+│   ├── phase3-overview.md     # ← 本文档
+│   └── ticklish-imagining-key.md  # Phase 3 实施规划
 │
-└── ticklish-imagining-key.md # Phase 3 实施规划
+├── data/                     # 数据目录
+│   ├── seed_questions.json   # — 种子题库 12 题
+│   ├── sessions/             # — ★ SessionStore 存储目录 (gitignored)
+│   └── chroma/               # — ★ ChromaDB 持久化目录 (gitignored)
+│
+├── web/                      # 界面层
+│   ├── __init__.py
+│   └── app.py                # — ★ Gradio Web UI (~280 行)
 ```
 
 ---
 
 ## 3. 核心数据流
 
-### 3.1 Gateway 模式（生产环境）
+### 3.1 完整面试流程（Gradio + FastAPI 同进程）
 
 ```
-  用户上传 JD + 简历
+  用户浏览器 → http://localhost:8000/ui
          │
          ▼
-  Streamlit Web UI (use_gateway=True)
+  ┌─────────────────────────────────────────┐
+  │  Gradio Web UI (web/app.py)             │
+  │                                          │
+  │  1. 上传 JD + 简历文件                    │
+  │  2. 点击「开始面试」                       │
+  │     → _parse_and_match()                 │
+  │       ├── parse_file(jd_path)            │
+  │       ├── JDParserAgent.run() → JD       │
+  │       ├── ResumeAnalyzerAgent.run()      │
+  │       └── generate_gap_map()             │
+  │     → _generate_next_question()          │
+  │       └── InterviewerAgent (含历史题库参考)│
+  │  3. 显示第一题 + 能力缺口分析              │
+  └──────────────┬──────────────────────────┘
+                 │
+  用户输入回答 → 点击「提交答案」
+                 │
+                 ▼
+  ┌─────────────────────────────────────────┐
+  │  _judge_answer() + _generate_next_question() │
+  │                                          │
+  │  1. InterviewerAgent.judge_answer()      │
+  │     → JudgeResult {score, next_action}   │
+  │  2. 检查终止条件                           │
+  │     ├── 连续空回答 ≥ 3 → terminated       │
+  │     ├── 轮次 ≥ max_rounds → terminated    │
+  │     └── next_action == "switch" → 切技能  │
+  │  3. 若未终止: _generate_next_question()   │
+  │     ├── deepen → generate_deepen_question │
+  │     ├── clarify → generate_clarify_question│
+  │     └── switch → generate_switch_question│
+  │  4. 若终止: _generate_report()            │
+  │     └── FeedbackAgent (5 维度评分)        │
+  └──────────────┬──────────────────────────┘
+                 │
+                 ▼
+  Gradio Chatbot 展示对话历史 + 评分
+  终止后展示完整报告（面试全程回顾）
+```
+
+### 3.2 REST API 模式（外部调用）
+
+```
+  外部客户端
          │
          │  POST /api/v1/interview  {"jd_path", "resume_path"}
          ▼
   ┌─────────────────────────────────────────┐
-  │  MCP Gateway (FastAPI)                  │
-  │                                         │
+  │  FastAPI Gateway                        │
   │  1. 限流检查 (令牌桶 60/min)             │
   │  2. 鉴权验证 (Bearer Token)             │
-  │  3. 调用 supervisor.init_interview()    │
-  │     → parse_jd → parse_resume → match   │
-  │  4. 调用 supervisor.generate_next_question() │
-  │  5. 保存到 SessionStore (JSON)           │
+  │  3. supervisor.init_interview()         │
+  │  4. supervisor.generate_next_question() │
+  │  5. SessionStore.save()                 │
   │  6. 返回 {interview_id, question}       │
   └──────────────┬──────────────────────────┘
                  │
                  ▼
-  Streamlit 显示第一题 → 用户输入回答
-         │
-         │  POST /api/v1/interview/{id}/talk  {"answer"}
-         ▼
-  ┌─────────────────────────────────────────┐
-  │  MCP Gateway                            │
-  │                                         │
-  │  1. 从 SessionStore 加载面试状态         │
-  │  2. 调用 supervisor.judge_and_decide()  │
-  │  3. 调用 supervisor.generate_next_question() │
-  │  4. 保存状态到 SessionStore              │
-  │  5. 返回 {judge, next_question, terminated} │
-  │                                         │
-  │  若 terminated=True:                    │
-  │    → store_interview_memory()           │
-  │    → 写入 VectorStore (ChromaDB)        │
-  │    → 更新候选人画像                      │
-  └──────────────┬──────────────────────────┘
-                 │
-                 ▼ (循环直到 terminated=True)
-         │
-         │  GET /api/v1/interview/{id}/report
-         ▼
-  ┌─────────────────────────────────────────┐
-  │  MCP Gateway                            │
-  │                                         │
-  │  1. 加载会话状态                         │
-  │  2. 调用 FeedbackAgent.generate_report()│
-  │  3. 标记 InterviewStatus.COMPLETED      │
-  │  4. 返回完整 5 维度报告                  │
-  └──────────────┬──────────────────────────┘
+  POST /api/v1/interview/{id}/talk  {"answer"}
                  │
                  ▼
-  Streamlit 展示完整报告（柱状图 + 技能明细 + 录用建议）
-```
-
-### 3.2 直调模式（开发调试）
-
-```
-  Web UI → Agent 直接调用（跳过 Gateway/鉴权/限流）
-
-  _init_interview()        → JDParserAgent + ResumeAnalyzerAgent + matcher
-  _generate_question()     → InterviewerAgent (含历史题库参考)
-  _judge_answer()          → InterviewerAgent.judge_answer()
-  _generate_report()       → FeedbackAgent.generate_report()
+  ┌─────────────────────────────────────────┐
+  │  1. SessionStore.load()                 │
+  │  2. supervisor.judge_and_decide()       │
+  │  3. supervisor.generate_next_question() │
+  │  4. SessionStore.save()                 │
+  │  5. 若 terminated:                      │
+  │     → store_interview_memory()          │
+  │     → VectorStore 写入                  │
+  │  6. 返回 {judge, next_question, terminated} │
+  └─────────────────────────────────────────┘
 ```
 
 ### 3.3 长期记忆写入
@@ -476,7 +485,6 @@ config.gateway_require_auth  # 是否开启鉴权，默认 True（可通过 GATE
 config.gateway_rate_limit    # 每分钟最大请求数，默认 60
 
 # ── Feature flags (Phase 3 新增) ──
-config.use_gateway           # Web UI 是否通过 Gateway 调用，默认 True
 config.use_vector_memory     # 是否启用 ChromaDB 记忆，默认 True
 ```
 
@@ -515,44 +523,54 @@ if hint:
     user_prompt += "\n" + hint  # 历史类似题目参考（避免重复，可借鉴风格）
 ```
 
-### 4.7 web/app.py — Gateway 模式 ★ 新增
+### 4.7 web/app.py — Gradio Web UI ★ 新增
 
-#### 双模式架构
+**定位**：Gradio Blocks 构建的三步面试界面，挂载在 FastAPI 的 `/ui` 路径下，同进程内直接调用 Agent。
+
+#### 三步流程
+
+```
+上传 JD + 简历 → 点击开始 → 面试对话 → 提交回答 → 评分 → 下一题 → ... → 报告
+  (upload_col)     (interview_col + Chatbot)              (report_col)
+```
+
+#### 核心组件
 
 ```python
-# Gateway 客户端函数
-_gateway_create_interview(jd_path, resume_path, candidate_name) -> dict
-_gateway_talk(interview_id, answer) -> dict
-_gateway_get_state(interview_id) -> dict
-_gateway_get_report(interview_id) -> dict
+demo = gr.Blocks(title="AI 面试官")
 
-# 模式切换
-st.session_state.use_gateway  # 默认 config.use_gateway (True)
-# Sidebar 中 toggle 切换，仅在新面试开始时生效
+# 三层 Column，通过 visible 属性切换显示
+upload_col    # 文件上传（JD + Resume）+ 开始按钮
+interview_col # Chatbot 对话 + 回答输入框 + 提交/结束按钮
+report_col    # Markdown 报告 + 重新开始按钮
+
+# 状态管理
+interview_state = gr.State()  # 存储完整面试状态字典
 ```
 
-#### Gateway 模式 vs 直调模式
+#### 关键回调函数
 
-| 操作 | Gateway 模式 | 直调模式 |
-|------|-------------|----------|
-| 初始化面试 | `POST /api/v1/interview` | `JDParserAgent + ResumeAnalyzerAgent + matcher` |
-| 提交回答 | `POST /api/v1/interview/{id}/talk` | `InterviewerAgent.judge_answer()` |
-| 下一题 | 包含在 talk 响应中（预存 `_next_question_gateway`） | `_generate_question()` |
-| 生成报告 | `GET /api/v1/interview/{id}/report` | `FeedbackAgent.generate_report()` |
-| 记忆存储 | Gateway 自动处理 | 不存储（仅内存） |
+```python
+on_start(jd_file, resume_file) -> (state, info, chat, answer, upload_col, interview_col, report_col)
+    """上传 → 解析 → 匹配 → 出第一题，切换到面试区"""
 
-#### Gateway 模式关键流程差异
+on_submit(answer, state) -> (state, chat, answer, report_md, interview_col, report_col)
+    """提交回答 → 评判 → 下一题（或终止 → 生成报告），直接返回渲染好的报告 Markdown"""
 
+_end_interview(state) -> (...)
+    """手动结束面试，生成报告并切换到报告区"""
 ```
-直调模式：
-  提交答案 → judge_answer() → 显示评判 → 用户点"继续" → _generate_question() → 显示新题
 
-Gateway 模式：
-  提交答案 → _gateway_talk() → 返回 {judge, next_question, terminated}
-  ├── 保存 _next_question_gateway (预存下一题)
-  ├── 显示评判结果
-  └── 用户点"继续" → 切换为预存的下一题（无需再调 API）
-```
+#### 与旧版（Streamlit）对比
+
+| 维度 | Streamlit (Phase 2) | Gradio (Phase 3) |
+|------|---------------------|------------------|
+| 代码量 | ~740 行 | ~280 行 |
+| 运行方式 | 独立进程 `streamlit run` | 挂载 FastAPI 同进程 |
+| 状态管理 | `st.session_state` 字典 | `gr.State()` 对象 |
+| 双模式切换 | `use_gateway` toggle + Gateway 客户端函数 | 不需要（同进程直调 Agent） |
+| 部署 | 需额外端口 | 共用 8000 端口 |
+| 学习成本 | 需学 Streamlit 概念 | 用户已有 Gradio 经验 |
 
 ---
 
@@ -561,7 +579,7 @@ Gateway 模式：
 ### 5.1 Gateway 启动流程
 
 ```
-python main.py gateway
+python main.py web
   │
   ▼
 uvicorn.run("mcp_servers.gateway:app")
@@ -711,7 +729,7 @@ vs.delete('ih_test', 'id1')
 "
 
 # 3. Gateway 启动验证
-python main.py gateway
+python main.py web
 curl http://localhost:8000/health                # → {"status": "ok", "tools": [...]}
 
 # 4. Gateway REST API 验证
@@ -722,9 +740,7 @@ curl -X POST http://localhost:8000/api/v1/interview \
 # → {"interview_id": "...", "question": {...}}
 
 # 5. 端到端验证
-# 终端 1: python main.py gateway  (启动 Gateway)
-# 终端 2: python main.py web       (启动 Web UI，默认 use_gateway=True)
-# → 上传文件 → 完整面试 → 查看历史
+# python main.py web → 浏览器打开 http://localhost:8000/ui → 上传文件 → 完整面试 → 查看历史
 ```
 
 ---
@@ -736,27 +752,19 @@ curl -X POST http://localhost:8000/api/v1/interview \
 cd d:/InterviewAgentHub
 source .venv/Scripts/activate
 
-# ── 生产模式（通过 Gateway） ──
-
-# 终端 1: 启动 Gateway
-python main.py gateway
-# → Gateway 监听 http://0.0.0.0:8000
-
-# 终端 2: 启动 Web UI（默认 use_gateway=True）
+# 2. 一键启动（Gateway + REST API + Gradio UI 全部在一个进程）
 python main.py web
+# → http://localhost:8000/ui      Gradio Web UI
+# → http://localhost:8000/docs    FastAPI Swagger 文档
+# → http://localhost:8000/health  健康检查
 
-# ── 开发模式（直调 Agent，跳过 Gateway） ──
+# ── 开发环境选项 ──
 
-NO_GATEWAY=1 python main.py web
-# → Web UI 直调 Agent，适合本地调试
+# 关闭 Gateway 鉴权
+GATEWAY_NO_AUTH=1 python main.py web
 
-# ── 关闭 Gateway 鉴权（开发环境） ──
-
-GATEWAY_NO_AUTH=1 python main.py gateway
-
-# ── 关闭向量记忆（纯内存模式） ──
-
-NO_VECTOR_MEMORY=1 python main.py gateway
+# 关闭向量记忆（纯内存模式）
+NO_VECTOR_MEMORY=1 python main.py web
 
 # ── CLI 工具 ──
 
@@ -783,7 +791,7 @@ python -m pytest tests/ -v            # 24 个测试
 | `fastapi>=0.110.0` | MCP Gateway | **3** |
 | `sse-starlette>=1.8.0` | MCP SSE transport | **3** |
 | `requests>=2.28.0` | Gateway HTTP 客户端 | **3** |
-| `streamlit>=1.30.0` | Web UI 框架 | 1 |
+| `gradio>=5.0.0` | Web UI 框架（挂载 FastAPI） | **3** |
 | `python-dotenv>=1.0.0` | .env 环境变量加载 | 1 |
 | `typer>=0.9.0` | CLI 命令行框架 | 1 |
 | `rich>=13.0.0` | 终端彩色输出 | 1 |
@@ -795,13 +803,13 @@ python -m pytest tests/ -v            # 24 个测试
 | 决策 | 选择 | 原因 |
 |------|------|------|
 | Gateway 实现方式 | FastAPI + in-process 加载 MCP Server | 单体部署，无需跨进程通信，简化运维 |
+| 前端框架 | Gradio 挂载 FastAPI (`gr.mount_gradio_app`) | 用户有使用经验，单进程零网络开销，代码量减半 |
 | MCP 路由策略 | 按工具名前缀路由到 Server 实例 | FastMCP 自带工具注册表，直接读取 _tool_manager |
 | Embedding 选择 | sentence-transformers 本地模型 | 零 API 调用成本，离线可用，384 维轻量 |
 | Embedding 网络策略 | 自动回退到 hf-mirror.com | 国内网络环境 SSL 问题，确保可用性 |
 | 会话存储格式 | JSON 文件（非 ChromaDB） | 轻量、人类可读、版本管理友好、零依赖 |
 | 降级策略 | 全部静默降级 | ChromaDB/Embedding 失败不影响核心面试流程 |
-| Gateway 模式切换 | Sidebar toggle + config 开关 | 生产用 Gateway，开发用直调，灵活切换 |
-| Gateway 下一题传递 | talk 响应中预存 `_next_question_gateway` | 减少 API 调用次数，提升用户体验 |
+| 前端状态管理 | `gr.State()` 存储完整面试字典 | 简单直接，比 Streamlit session_state 更直观 |
 | 面试记忆写入 | terminated 时调用 | 确保只写入完整面试，不写入半截数据 |
 | 历史题库参考 | 追加到出题 prompt 末尾 | 非侵入式，不影响 LLM 原有出题逻辑 |
 | 鉴权开关 | 通过 `GATEWAY_NO_AUTH` 环境变量控制 | 开发环境跳过鉴权，生产环境强制验证 |
