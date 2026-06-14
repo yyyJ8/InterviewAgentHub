@@ -28,3 +28,6 @@ data/chroma/
 data/sessions/
 
 # Docker (future — files will be tracked when created)
+
+# Environment
+.env

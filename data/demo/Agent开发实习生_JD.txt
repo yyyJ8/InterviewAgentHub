@@ -1,0 +1,40 @@
+岗位名称：Agent 开发实习生
+公司：某 AI 科技公司
+工作地点：北京/远程
+薪资范围：250-400/天
+经验要求：不限（在校生优先）
+
+岗位描述：
+我们正在研发下一代 AI Agent 平台，面向企业客户提供可定制的智能体解决方案。作为 Agent 开发实习生，你将参与到核心 Agent 框架的设计与实现中，包括多 Agent 协作编排、工具调用协议、长期记忆系统等模块。团队成员来自国内外一线大厂，有丰富的 LLM 应用开发经验。
+
+岗位职责：
+1. 参与 Agent 核心循环的开发与优化，包括 ReAct 策略、反思机制、多轮对话状态管理
+2. 基于 LangGraph 或自研编排引擎，实现多 Agent 的串行/并行调度和条件路由
+3. 开发和维护 MCP (Model Context Protocol) Server，实现工具的标准注册、发现和调用
+4. 集成向量数据库（如 ChromaDB、Milvus）实现 Agent 的长期记忆和历史检索功能
+5. 参与 RAG 系统的设计与调优，包括文档解析、文本分块、混合检索、重排序等环节
+6. 编写 FastAPI 接口，将 Agent 能力封装为 RESTful API 供前端和外部系统调用
+7. 参与流式输出（SSE/WebSocket）的实现，优化前端交互体验
+8. 编写单元测试和集成测试，参与代码评审
+
+任职要求：
+1. 计算机相关专业本科及以上在读，有实习经验或项目经验优先
+2. 熟练掌握 Python，熟悉 asyncio 异步编程，代码规范、可读性强
+3. 了解 LLM 的基本原理和常见 API（OpenAI / Anthropic / DeepSeek 至少一种）
+4. 了解至少一种 Agent 框架（LangGraph / CrewAI / AutoGen / 自研均可）
+5. 了解 Prompt Engineering 的基本方法（Few-shot / Chain-of-Thought / System Prompt 设计）
+6. 了解 FastAPI 或类似 Web 框架，能独立开发简单的 API 服务
+7. 有 Git 版本控制习惯，了解基本的协作流程
+
+加分项：
+1. 有 MCP 协议的实际使用或开发经验
+2. 在实际项目中用过向量数据库（ChromaDB / Pinecone / Milvus）
+3. 了解流式输出机制（SSE），有 Gradio / Streamlit 前端开发经验
+4. 有自己的开源项目或技术博客
+5. 了解 Docker 基本使用
+6. 了解评测方法（LLM-as-Judge / RAGAS 等）
+
+软技能要求：
+1. 良好的沟通能力，能清晰表达技术方案和设计思路
+2. 较强的学习能力，能快速跟进 AI 领域的新技术
+3. 注重代码质量和文档，有工程化的思维方式
