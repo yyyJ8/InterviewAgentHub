@@ -185,4 +185,8 @@ class BaseAgent:
             except (json.JSONDecodeError, ValueError):
                 pass
 
-        raise ValueError(f"无法从响应中提取有效 JSON:\n{text[:500]}")
+        raise ValueError(
+            f"无法从响应中提取有效 JSON (共 {len(text)} 字符):\n"
+            f"---前 300 字符---\n{text[:300]}\n"
+            f"---后 200 字符---\n{text[-200:]}"
+        )

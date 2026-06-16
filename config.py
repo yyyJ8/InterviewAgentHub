@@ -45,6 +45,7 @@ class Config:
     # ── Gateway ──
     gateway_host: str = "0.0.0.0"
     gateway_port: int = 8000
+    gradio_ui_port: int = 7860
     gateway_api_key: str = field(default_factory=lambda: os.getenv("GATEWAY_API_KEY", "dev-key-change-me"))
     gateway_require_auth: bool = not bool(os.getenv("GATEWAY_NO_AUTH", ""))  # 默认开启鉴权
     gateway_rate_limit: int = int(os.getenv("GATEWAY_RATE_LIMIT", "60"))  # 每分钟最大请求数

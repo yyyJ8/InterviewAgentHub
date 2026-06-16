@@ -272,14 +272,7 @@ async def startup():
 
     # Session Store
     app.state.session_store = SessionStore()
-
-    # Gradio Web UI
-    try:
-        from web.app import demo as gradio_demo
-        gradio_app = gr.mount_gradio_app(app, gradio_demo, path="/ui")
-        logger.info("Gradio Web UI 挂载成功: /ui")
-    except Exception as e:
-        logger.warning("Gradio Web UI 挂载失败: %s", e)
+    logger.info("Gradio Web UI 由 main.py 独立启动（端口 %s），不走 mount", config.gradio_ui_port)
 
     logger.info("已注册工具: %s", registry.tool_names)
     logger.info("Gateway 启动完成，监听 %s:%s", config.gateway_host, config.gateway_port)

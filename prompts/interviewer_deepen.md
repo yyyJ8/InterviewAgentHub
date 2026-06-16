@@ -27,14 +27,14 @@
 
 ## 输出 JSON 格式
 
-```json
-{
+```
+{{
   "skill": "考察的技能名称",
   "difficulty": "难度级别(basic/intermediate/advanced/deep)",
   "content": "追问题目，具体且深入的技术问题",
   "context": "追问背景，说明是基于候选人哪部分回答的延伸",
   "expected_answer_points": ["得分点1", "得分点2", "得分点3"]
-}
+}}
 ```
 
 请直接输出 JSON，不要多余说明。

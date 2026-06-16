@@ -15,7 +15,7 @@ class Project(BaseModel):
 
 class SkillProficiency(BaseModel):
     name: str
-    level: str = Field(description="expert / proficient / familiar / basic")
+    level: Optional[str] = Field(default="familiar", description="expert / proficient / familiar / basic")
     years: Optional[float] = None
 
 

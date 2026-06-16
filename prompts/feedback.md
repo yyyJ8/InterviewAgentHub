@@ -39,25 +39,25 @@
 
 ## 输出 JSON 格式
 
-```json
-{
+```
+{{
   "total_score": 最终总分0-100,
-  "dimension_scores": {
+  "dimension_scores": {{
     "技术匹配度": 分数0-100,
     "项目经验": 分数0-100,
     "沟通表达": 分数0-100,
     "学习能力": 分数0-100,
     "文化匹配": 分数0-100
-  },
+  }},
   "skill_scores": [
-    {"skill": "技能名", "score": 分数, "comment": "评估说明"}
+    {{"skill": "技能名", "score": 分数, "comment": "评估说明"}}
   ],
   "strengths": ["亮点陈述1", "亮点陈述2"],
   "weaknesses": ["不足陈述1", "不足陈述2"],
   "suggestions": ["改进建议1", "改进建议2"],
   "overall_assessment": "2-3句话的总体评价",
   "hiring_recommendation": "strong_yes / yes / hesitate / no"
-}
+}}
 ```
 
 请直接输出 JSON，不要多余说明。

@@ -21,14 +21,14 @@
 
 ## 输出 JSON
 
-```json
-{
+```
+{{
   "score": 总体分数0-100,
   "comment": "综合评价，2-3句话总结表现",
   "strength_points": ["亮点1", "亮点2"],
   "weakness_points": ["不足1", "不足2"],
   "next_action": "下一步建议: deepen(追问加深) / clarify(需要澄清) / switch(换技能) / end(结束)"
-}
+}}
 ```
 
 评分标准参考：
