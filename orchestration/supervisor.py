@@ -120,6 +120,9 @@ def _next_action_label(state: InterviewState) -> str:
     if not judge:
         return "continue"
 
+    ordered = state.get("ordered_skills", [])
+    total_skills = len(ordered)
+
     # 1. 连续空回答检测
     if not state.get("answer", "").strip():
         empty_count = state.get("consecutive_empty", 0) + 1
@@ -131,13 +134,19 @@ def _next_action_label(state: InterviewState) -> str:
         return "end"
 
     # 3. 所有技能已覆盖
-    if state.get("current_skill_index", 0) >= len(state.get("ordered_skills", [])):
+    if state.get("current_skill_index", 0) >= total_skills:
         return "end"
 
-    # 4. 根据评判结果的 next_action
+    # 4. 根据评判结果的 next_action（带安全兜底）
     action = judge.next_action.strip().lower()
+
+    # 如果 judge 说 end 但还有未考察的技能 → 强制 switch
+    if action == "end" and state.get("current_skill_index", 0) < total_skills - 1:
+        return "switch"
+
     if action in ("deepen", "clarify", "switch"):
         return action
+
     return "end"
 
 
@@ -241,6 +250,7 @@ async def generate_question_node(state: InterviewState) -> dict:
                     target_skill=skill_name,
                     difficulty=_skill_difficulty(ordered[state["current_skill_index"]]),
                     intent=reason,
+                    candidate_name=state.get("candidate_name", ""),
                 )
         else:
             # 首次出题
@@ -250,6 +260,7 @@ async def generate_question_node(state: InterviewState) -> dict:
                 target_skill=item["skill"],
                 difficulty=_skill_difficulty(item),
                 intent=item.get("reason", f"考察 {item['skill']}"),
+                candidate_name=state.get("candidate_name", ""),
             )
 
         return {"question": question, "error": None}
@@ -435,7 +446,7 @@ async def judge_and_decide(state: dict, answer: str) -> dict:
 # ── 记忆钩子（Phase 3: VectorStore 集成） ─────────────
 
 def store_interview_memory(state: dict) -> bool:
-    """面试结束时，将面试记录写入向量库 + 更新候选人画像。
+    """面试结束时，将面试记录写入向量库。
 
     在 Gateway 的 talk 端点中、面试终止时调用。
     失败时静默降级，不抛出异常。
@@ -448,14 +459,13 @@ def store_interview_memory(state: dict) -> bool:
             return False
 
         import json
-        from models.question import RoundRecord
 
         candidate_name = state.get("candidate_name", "匿名")
         interview_id = state.get("interview_id", "")
         jd = state.get("jd")
         rounds = state.get("rounds", [])
 
-        # 1. 存储面试记录
+        # 序列化面试轮次
         rounds_json = []
         for r in rounds:
             if hasattr(r, "model_dump"):
@@ -484,23 +494,6 @@ def store_interview_memory(state: dict) -> bool:
             },
         )
 
-        # 2. 更新候选人画像
-        resume = state.get("resume")
-        profile_doc = json.dumps({
-            "name": candidate_name,
-            "title": resume.title if resume else "",
-            "skills": [s.model_dump() if hasattr(s, "model_dump") else s for s in (resume.skills if resume else [])],
-        }, ensure_ascii=False, default=str)
-
-        vs.update_candidate_profile(
-            candidate_name,
-            profile_doc,
-            extra_meta={
-                "last_interview_at": interview_id,
-                "interview_count": 1,  # 后续可累积
-            },
-        )
-
         return True
     except Exception:
         return False
@@ -517,6 +510,37 @@ def retrieve_candidate_history(candidate_name: str) -> list[dict]:
         return vs.search_candidate_history(candidate_name)
     except Exception:
         return []
+
+
+def get_candidate_history_summary(candidate_name: str) -> str:
+    """查询候选人历史面试，返回可注入 Prompt 的摘要。
+
+    无历史记录时返回空字符串，异常时静默返回空。
+    用于面试出题时提供上下文。
+    """
+    try:
+        from memory.vector_store import VectorStore
+
+        vs = VectorStore()
+        if not vs.available:
+            return ""
+        results = vs.search_candidate_history(candidate_name)
+        if not results:
+            return ""
+        parts = [
+            f"### 候选人 {candidate_name} 的历史面试记录",
+            f"共 {len(results)} 条记录：",
+        ]
+        for i, r in enumerate(results[:3], 1):  # 最多取最近 3 条
+            meta = r.get("metadata", {})
+            parts.append(
+                f"{i}. 岗位 {meta.get('jd_title', '未知')}，"
+                f"{meta.get('round_count', 0)} 轮，"
+                f"均分 {meta.get('total_score', 0):.0f}"
+            )
+        return "\n".join(parts)
+    except Exception:
+        return ""
 
 
 def retrieve_similar_questions(skill: str, n: int = 3) -> list[dict]:

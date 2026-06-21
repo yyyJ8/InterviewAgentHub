@@ -19,7 +19,8 @@
 | LangGraph | AI 面试官项目的编排框架 |
 | MCP SDK | 模型上下文协议实现 |
 | ChromaDB | 长期记忆存储（本地向量库） |
-| 本地虚拟机 | 部署环境，面试时当场 demo |
+| BGE-base-zh-v1.5 | Embedding 模型（768 维，中文 SOTA，本地加载） |
+| Gradio 5 | Web UI（原生 async 支持） |
 
 ---
 
@@ -41,16 +42,18 @@ JD Server → 简历 Server → 题库 Server  ← 独立 MCP Server
 Supervisor（LangGraph 编排）
   ├── JD 解析 Agent
   ├── 简历分析 Agent
-  ├── 面试官 Agent（多轮追问）
+  ├── 面试官 Agent（多轮追问 + 流式出题）
   └── 反馈 Agent（评分 + 报告）
 ```
 
 ### 核心实现思路
 
-1. **DAG 编排**：强依赖串行（定位→修复→验证），弱依赖并行（多个角度同时研究）
-2. **多轮对话**：面试官根据候选人回答动态出下一题，状态管理
-3. **长期记忆**：向量库存储面试记录，下次面试可参考历史
-4. **MCP Gateway**：统一管理多个 Server，加鉴权和限流
+1. **DAG 编排**：强依赖串行（解析→匹配→出题），弱依赖并行（多个角度同时研究）
+2. **多轮对话**：面试官根据候选人回答动态出下一题（deepen / clarify / switch），状态管理
+3. **长期记忆**：ChromaDB 向量库存储面试记录，下次面试可参考历史
+4. **MCP Gateway**：统一管理多个 Server，加鉴权、限流、熔断
+5. **流式输出**：面试题逐字生成，打字机效果
+6. **语义匹配**：BGE embedding 做 JD ↔ 简历技能模糊匹配（规划中）
 
 ### 面试价值
 
@@ -78,8 +81,16 @@ Phase 3（第 2-3 周）：MCP Gateway + 长期记忆
 
 Phase 4（第 3 周）：工程化 + Demo 准备
   - Agent 行为测试
-  - Docker + 虚拟机部署
+  - Gradio Web UI 迁移
   - Demo 脚本和面试话术准备
+
+Phase 5（第 4 周）：优化与体验升级
+  - 消除 _async() 反模式，全链路原生 async
+  - 统一状态机（Gradio + Gateway 共用 supervisor）
+  - 首题流式输出（打字机效果）
+  - Prompt 模板变量校验
+  - 环境区分（dev/prod）
+  - Embedding 升级为 BGE-base-zh-v1.5（本地 768 维）
 ```
 
 ---
@@ -132,5 +143,5 @@ touch mini_framework/tests/__init__.py
 
 ## 记忆索引
 
-- 暂无（后续面试官项目开发过程中的关键决策/踩坑记录存放于此）
-- requirements.txt 位于项目根目录，记录了项目二的全部依赖
+- [optimization-roadmap.md](docs/optimization-roadmap.md) — 完整优化升级方案（Phase 5 产出）
+- requirements.txt 位于项目根目录，记录了项目全部依赖

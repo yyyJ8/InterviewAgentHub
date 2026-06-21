@@ -22,50 +22,70 @@
 
 ## 提取规则
 
-1. **required_skills（必备技能）**：
-   - 从"任职要求 / 必备技能 / 岗位要求"等部分提取
-   - weight 表示该技能的重要程度——按出现频次、描述篇幅、强调程度综合判断
-   - 核心技能给 80-100，重要技能给 60-79，一般技能给 30-59
-   - 带有"精通/深入"字样的技能权重不低于 80
+### 1. 什么算"技能"（required_skills / bonus_skills）
 
-2. **bonus_skills（加分技能）**：
-   - 从"加分项 / 优先 / 了解即可"等部分提取
-   - is_bonus 固定为 true
+✅ 应该提取为技能的：
+- 编程语言：Java、Python、Go、C++、JavaScript 等
+- 框架/库：Spring Boot、MyBatis、React、Vue、Flink 等
+- 数据库/中间件：MySQL、Redis、Kafka、Elasticsearch 等
+- 领域知识：微服务架构、分布式系统、性能优化 等
+- 具体协议/标准：RESTful API、OAuth2、gRPC 等
 
-3. **soft_skills（软技能）**：
-   - 提取沟通能力、团队协作、抗压能力等非技术类要求
+❌ 不应该提取为技能的（放入 soft_skills 或忽略）：
+- IDE/开发工具：IDEA、VS Code、Git、Maven、Gradle —— 这是工具，不是技能
+- 软性要求：编码经验、学习能力、责任心、团队协作 —— 放入 soft_skills
+- 模糊描述：数据库基础知识 → 应变为具体的 "MySQL" 或 "SQL"
+- 学历/专业要求：计算机相关专业 —— 放入 education
 
-4. **experience_years**：只提取明确的数字年数要求
+### 2. 技能去重与合并
+
+- JD 中同时提到 Spring、SpringBoot、SpringCloud → 合并为 "Spring 生态" 即可（实习生岗位不必拆分过细）
+- JD 中同时提到 MySQL、SQL、数据库 → 合并为 "MySQL/SQL"，只取一个
+- 避免把同一技术的不同表述拆成多个技能
+
+### 3. 权重赋值
+
+- 核心技能（JD 反复强调、大篇幅描述）：80-100
+- 重要技能（明确列出但未展开）：60-79
+- 加分技能（了解即可、优先）：30-59，is_bonus = true
+
+### 4. soft_skills
+
+- 提取沟通能力、团队协作、学习能力等非技术类要求
+- 不要把 "编码经验" 当成技能——它是素质要求，放 soft_skills
+
+### 5. experience_years
+
+- 只提取明确的数字年数
+- "实习" 或 "应届" → 填 0 或 null
 
 ## 示例
 
 输入：
 ```
-岗位名称：高级后端工程师
+岗位名称：Java 开发实习生
 任职要求：
-- Python：精通，5年以上
-- Django：熟悉
-加分项：
-- Go：了解即可
-- Kubernetes：优先
+- 熟悉Java基础语法，会使用IDEA开发工具
+- 了解Spring、SpringBoot、MyBatis等框架
+- 熟悉MySQL，掌握SQL语言
+- 具备良好的学习能力和团队协作精神
+- 有编码经验优先
 ```
 
 输出：
 ```json
 {
-  "title": "高级后端工程师",
+  "title": "Java 开发实习生",
   "company": "",
   "required_skills": [
-    { "name": "Python", "weight": 90, "is_bonus": false },
-    { "name": "Django", "weight": 65, "is_bonus": false }
+    { "name": "Java", "weight": 85, "is_bonus": false },
+    { "name": "Spring 生态", "weight": 75, "is_bonus": false },
+    { "name": "MySQL/SQL", "weight": 75, "is_bonus": false }
   ],
-  "bonus_skills": [
-    { "name": "Go", "weight": 40, "is_bonus": true },
-    { "name": "Kubernetes", "weight": 50, "is_bonus": true }
-  ],
-  "experience_years": 5,
-  "education": null,
-  "soft_skills": [],
+  "bonus_skills": [],
+  "experience_years": 0,
+  "education": "本科",
+  "soft_skills": ["学习能力", "团队协作", "编码经验"],
   "raw_text": ""
 }
 ```

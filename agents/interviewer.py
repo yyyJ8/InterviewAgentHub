@@ -39,6 +39,7 @@ class InterviewerAgent(BaseAgent):
         target_skill: str,
         difficulty: str = "intermediate",
         intent: str = "",
+        candidate_name: str = "",
     ) -> Question:
         """根据 JD + 候选人 + 目标技能生成一道面试题"""
         ctx = self._build_context(jd, resume)
@@ -51,10 +52,18 @@ class InterviewerAgent(BaseAgent):
             difficulty=difficulty,
             intent=intent or f"考察 {target_skill} 的掌握程度",
         )
-        # Phase 3: 附带历史题库参考（可选）
-        hint = self._get_similar_questions_hint(target_skill)
-        if hint:
-            user_prompt += "\n" + hint
+        # Phase 5: 附加长期记忆参考（历史题库 + 候选人历史）
+        hints = []
+        q_hint = self._get_similar_questions_hint(target_skill)
+        if q_hint:
+            hints.append(q_hint)
+        if candidate_name:
+            c_hint = self._get_candidate_history_hint(candidate_name)
+            if c_hint:
+                hints.append(c_hint)
+        if hints:
+            user_prompt += "\n\n" + "\n\n".join(hints)
+
         question = await super().run(
             user_prompt=user_prompt,
             response_model=Question,
@@ -62,6 +71,7 @@ class InterviewerAgent(BaseAgent):
         )
         question.skill = target_skill
         question.difficulty = Difficulty(difficulty)
+        self._store_question(question)
         return question
 
     async def generate_question_stream(
@@ -71,6 +81,7 @@ class InterviewerAgent(BaseAgent):
         target_skill: str,
         difficulty: str = "intermediate",
         intent: str = "",
+        candidate_name: str = "",
     ) -> AsyncIterator[tuple[str, bool, Optional[Question]]]:
         """流式出题：边生成边返回文字块。
 
@@ -91,10 +102,17 @@ class InterviewerAgent(BaseAgent):
             difficulty=difficulty,
             intent=intent or f"考察 {target_skill} 的掌握程度",
         )
-        # Phase 3: 附带历史题库参考
-        hint = self._get_similar_questions_hint(target_skill)
-        if hint:
-            user_prompt += "\n" + hint
+        # Phase 5: 附加长期记忆参考（历史题库 + 候选人历史）
+        hints = []
+        q_hint = self._get_similar_questions_hint(target_skill)
+        if q_hint:
+            hints.append(q_hint)
+        if candidate_name:
+            c_hint = self._get_candidate_history_hint(candidate_name)
+            if c_hint:
+                hints.append(c_hint)
+        if hints:
+            user_prompt += "\n\n" + "\n\n".join(hints)
 
         try:
             async for delta, done, result in super().run_streaming(
@@ -106,6 +124,7 @@ class InterviewerAgent(BaseAgent):
                 if done and result is not None:
                     result.skill = target_skill
                     result.difficulty = Difficulty(difficulty)
+                    self._store_question(result)
                 yield (delta, done, result)
         except Exception as e:
             logger.error("流式出题失败: %s", e)
@@ -144,6 +163,7 @@ class InterviewerAgent(BaseAgent):
         )
         question.skill = target_skill
         question.difficulty = Difficulty(next_difficulty)
+        self._store_question(question)
         return question
 
     async def generate_clarify_question(
@@ -174,6 +194,7 @@ class InterviewerAgent(BaseAgent):
         )
         question.skill = target_skill
         question.difficulty = Difficulty(difficulty)
+        self._store_question(question)
         return question
 
     async def generate_switch_question(
@@ -201,6 +222,7 @@ class InterviewerAgent(BaseAgent):
         )
         question.skill = target_skill
         question.difficulty = Difficulty(difficulty)
+        self._store_question(question)
         return question
 
     async def judge_answer(
@@ -272,6 +294,41 @@ class InterviewerAgent(BaseAgent):
         except Exception:
             pass
         return ""
+
+    def _get_candidate_history_hint(self, candidate_name: str) -> str:
+        """查询候选人历史面试记录，返回 Prompt 摘要。静默失败。"""
+        try:
+            from orchestration.supervisor import get_candidate_history_summary
+            return get_candidate_history_summary(candidate_name)
+        except Exception:
+            return ""
+
+    def _store_question(self, question: Question) -> None:
+        """将已出题目写入向量库，供后续出题时语义检索参考。
+
+        写入失败静默忽略，不影响核心面试流程。
+        """
+        try:
+            from memory.vector_store import VectorStore
+            from config import config
+            import uuid
+
+            if not config.use_vector_memory:
+                return
+            vs = VectorStore()
+            if not vs.available:
+                return
+            vs.add(
+                "ih_question_bank",
+                documents=[question.content],
+                metadatas=[{
+                    "skill": question.skill,
+                    "difficulty": question.difficulty.value,
+                }],
+                ids=[uuid.uuid4().hex[:8]],
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def rank_skills(jd: JD, resume: Resume) -> list[dict]:

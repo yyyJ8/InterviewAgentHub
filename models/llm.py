@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator, Optional
 
 from openai import AsyncOpenAI
 
 from config import config
+
+logger = logging.getLogger("llm")
+
+
+class EmptyResponseError(Exception):
+    """LLM 返回空响应——通常是服务端瞬时过载，重试可能恢复。"""
 
 
 class LLM:
@@ -32,8 +39,8 @@ class LLM:
     ) -> str | AsyncIterator[str]:
         """非流式返回完整文本，流式返回 AsyncIterator[str]"""
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": str(system_prompt)},
+            {"role": "user", "content": str(user_prompt)},
         ]
         response = await self.client.chat.completions.create(
             model=config.llm_model,
@@ -46,7 +53,18 @@ class LLM:
         if stream:
             return self._stream_handler(response)
         else:
-            return response.choices[0].message.content or ""
+            content = response.choices[0].message.content
+            finish = response.choices[0].finish_reason
+
+            if not content or not content.strip():
+                logger.warning(
+                    "LLM 返回空响应 (finish_reason=%s, model=%s)",
+                    finish, config.llm_model,
+                )
+                raise EmptyResponseError(
+                    f"模型返回空内容 (finish_reason={finish})"
+                )
+            return content
 
     async def _stream_handler(self, response) -> AsyncIterator[str]:
         async for chunk in response:

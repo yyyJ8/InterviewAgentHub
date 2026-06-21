@@ -70,19 +70,23 @@ class FeedbackAgent(BaseAgent):
         )
         return report
 
-    def _build_transcript(self, rounds: list[dict]) -> str:
-        """构建面试记录文本"""
+    def _build_transcript(self, rounds: list) -> str:
+        """构建面试记录文本（兼容 Pydantic RoundRecord 和 dict）"""
         lines = []
         for i, r in enumerate(rounds, 1):
-            q = r.get("question", {})
-            judge = r.get("judge", {})
+            if hasattr(r, "question"):
+                q, answer, judge = r.question, r.answer, r.judge
+            elif isinstance(r, dict):
+                q = r.get("question", {})
+                answer = r.get("answer", "")
+                judge = r.get("judge", {})
+            else:
+                continue
 
-            # Support both object and dict access
             q_content = q.content if hasattr(q, "content") else q.get("content", "")
             q_skill = q.skill if hasattr(q, "skill") else q.get("skill", "")
             q_diff = q.difficulty.value if hasattr(q.difficulty, "value") else q.get("difficulty", "")
 
-            answer = r.get("answer", "")
             score = judge.score if hasattr(judge, "score") else judge.get("score", 0)
             comment = judge.comment if hasattr(judge, "comment") else judge.get("comment", "")
             strength = judge.strength_points if hasattr(judge, "strength_points") else judge.get("strength_points", [])

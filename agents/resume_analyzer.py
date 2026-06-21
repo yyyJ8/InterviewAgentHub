@@ -20,8 +20,10 @@ class ResumeAnalyzerAgent(BaseAgent):
         resume_text: str,
     ) -> Resume:
         """解析简历文本，返回结构化 Resume 对象"""
+        # 截断过长的输入，给 LLM 输出留足 token 空间
+        trimmed = resume_text[:3000] if len(resume_text) > 3000 else resume_text
         resume = await super().run(
-            user_prompt=resume_text,
+            user_prompt=trimmed,
             response_model=Resume,
             system_prompt=self._system_prompt,
         )

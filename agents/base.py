@@ -8,7 +8,7 @@ from typing import AsyncIterator, Optional, Type, TypeVar
 
 from pydantic import BaseModel
 
-from models.llm import LLM
+from models.llm import LLM, EmptyResponseError
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -63,6 +63,17 @@ class BaseAgent:
                     temperature=0.3,  # 解析场景用低温度保证稳定性
                 )
                 return self._parse_response(response_text, response_model)
+
+            except EmptyResponseError as e:
+                # 服务端返回空内容 → 通常是瞬时过载，用更长的退避
+                last_error = e
+                if attempt < max_retries:
+                    delay = backoff_base * (3 ** attempt)  # 1s → 3s → 9s
+                    logger.warning(
+                        "LLM 返回空响应 (第 %d/%d 次)，%.1f 秒后重试...",
+                        attempt + 1, max_retries + 1, delay,
+                    )
+                    await asyncio.sleep(delay)
 
             except (json.JSONDecodeError, ValueError, KeyError) as e:
                 last_error = e

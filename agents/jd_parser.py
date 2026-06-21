@@ -20,8 +20,10 @@ class JDParserAgent(BaseAgent):
         jd_text: str,
     ) -> JD:
         """解析 JD 文本，返回结构化 JD 对象"""
+        # 截断过长的输入，给 LLM 输出留足 token 空间
+        trimmed = jd_text[:3000] if len(jd_text) > 3000 else jd_text
         jd = await super().run(
-            user_prompt=jd_text,
+            user_prompt=trimmed,
             response_model=JD,
             system_prompt=self._system_prompt,
         )

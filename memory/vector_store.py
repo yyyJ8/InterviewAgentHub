@@ -1,12 +1,10 @@
 """ChromaDB 向量存储封装
 
-提供 4 个 Collection 的 CRUD 操作：
-  - ih_jd_history       : JD 全文
-  - ih_question_bank    : 题目内容
-  - ih_interview_sessions: 面试记录全文
-  - ih_candidate_profiles: 候选人简历摘要
+提供 2 个 Collection 的 CRUD 操作：
+  - ih_question_bank     : 已出题目（语义检索避免重复）
+  - ih_interview_sessions: 面试记录全文（历史参考）
 
-Embedding 策略：本地 sentence-transformers/all-MiniLM-L6-v2
+Embedding 策略：本地 BAAI/bge-base-zh-v1.5（768 维）
 连接失败时优雅降级，不影响核心面试流程。
 """
 
@@ -21,18 +19,14 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
-# ── 4 个 Collection 名称 ──────────────────────────────────
+# ── 2 个 Collection 名称 ──────────────────────────────────
 
-COLLECTION_JD_HISTORY = "ih_jd_history"
 COLLECTION_QUESTION_BANK = "ih_question_bank"
 COLLECTION_INTERVIEW_SESSIONS = "ih_interview_sessions"
-COLLECTION_CANDIDATE_PROFILES = "ih_candidate_profiles"
 
 ALL_COLLECTIONS = [
-    COLLECTION_JD_HISTORY,
     COLLECTION_QUESTION_BANK,
     COLLECTION_INTERVIEW_SESSIONS,
-    COLLECTION_CANDIDATE_PROFILES,
 ]
 
 
@@ -247,17 +241,6 @@ class VectorStore:
         """搜索候选人的历史面试记录。"""
         return self.query(
             COLLECTION_INTERVIEW_SESSIONS, candidate_name, n_results=5
-        )
-
-    def update_candidate_profile(self, name: str, profile_json: str, extra_meta: Optional[dict] = None) -> bool:
-        """写入或更新候选人画像。"""
-        metadata = extra_meta or {}
-        metadata["name"] = name
-        return self.add(
-            COLLECTION_CANDIDATE_PROFILES,
-            documents=[profile_json],
-            metadatas=[metadata],
-            ids=[f"profile_{name}"],
         )
 
     @property
