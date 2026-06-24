@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import AsyncIterator, Optional
 
+import httpx
 from openai import AsyncOpenAI
 
 from config import config
@@ -26,6 +27,7 @@ class LLM:
             self._client = AsyncOpenAI(
                 api_key=config.llm_api_key,
                 base_url=config.llm_base_url,
+                timeout=httpx.Timeout(300.0, connect=30.0),
             )
         return self._client
 

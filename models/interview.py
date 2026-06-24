@@ -32,9 +32,11 @@ class InterviewState(BaseModel):
     status: InterviewStatus = InterviewStatus.CREATED
     jd: Optional[JD] = None
     resume: Optional[Resume] = None
-    gap_analysis: Optional[list[dict]] = None  # 能力缺口列表
+    gap_analysis: Optional[dict] = None  # 能力缺口映射（含 ordered_skills 等）
     rounds: list[RoundState] = Field(default_factory=list)
     current_round: int = 0
+    question: Optional[Question] = None   # 待回答的当前题目
+    answer: Optional[str] = ""            # 候选人对当前题目的回答
     candidate_name: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)

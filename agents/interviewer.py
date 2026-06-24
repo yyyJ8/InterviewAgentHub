@@ -166,6 +166,46 @@ class InterviewerAgent(BaseAgent):
         self._store_question(question)
         return question
 
+    async def generate_deepen_question_stream(
+        self,
+        jd: JD,
+        resume: Resume,
+        target_skill: str,
+        difficulty: str,
+        previous_question: str,
+        previous_answer: str,
+    ) -> AsyncIterator[tuple[str, bool, Optional[Question]]]:
+        """流式追问加深：边生成边返回文字块。"""
+        ctx = self._build_context(jd, resume)
+        difficulty_levels = ["basic", "intermediate", "advanced", "deep"]
+        next_level = min(difficulty_levels.index(difficulty) + 1, len(difficulty_levels) - 1)
+        next_difficulty = difficulty_levels[next_level]
+
+        user_prompt = self._deepen_prompt_tpl.format(
+            job_title=jd.title,
+            required_skills=ctx["required_skills_str"],
+            candidate_skills=ctx["candidate_skills_str"],
+            candidate_projects=ctx["candidate_projects_str"],
+            target_skill=target_skill,
+            difficulty=next_difficulty,
+            previous_question=previous_question,
+            previous_answer=previous_answer,
+        )
+        try:
+            async for delta, done, result in super().run_streaming(
+                user_prompt=user_prompt,
+                response_model=Question,
+                system_prompt="你是一个专业的 AI 面试官，擅长追问技术细节考察深度。",
+            ):
+                if done and result is not None:
+                    result.skill = target_skill
+                    result.difficulty = Difficulty(next_difficulty)
+                    self._store_question(result)
+                yield (delta, done, result)
+        except Exception as e:
+            logger.error("流式追问失败: %s", e)
+            yield ("", True, None)
+
     async def generate_clarify_question(
         self,
         jd: JD,
@@ -197,6 +237,42 @@ class InterviewerAgent(BaseAgent):
         self._store_question(question)
         return question
 
+    async def generate_clarify_question_stream(
+        self,
+        jd: JD,
+        resume: Resume,
+        target_skill: str,
+        difficulty: str,
+        previous_question: str,
+        previous_answer: str,
+    ) -> AsyncIterator[tuple[str, bool, Optional[Question]]]:
+        """流式澄清：边生成边返回文字块。"""
+        ctx = self._build_context(jd, resume)
+        user_prompt = self._clarify_prompt_tpl.format(
+            job_title=jd.title,
+            required_skills=ctx["required_skills_str"],
+            candidate_skills=ctx["candidate_skills_str"],
+            candidate_projects=ctx["candidate_projects_str"],
+            target_skill=target_skill,
+            difficulty=difficulty,
+            previous_question=previous_question,
+            previous_answer=previous_answer,
+        )
+        try:
+            async for delta, done, result in super().run_streaming(
+                user_prompt=user_prompt,
+                response_model=Question,
+                system_prompt="你是一个专业的 AI 面试官，擅长引导候选人澄清回答。",
+            ):
+                if done and result is not None:
+                    result.skill = target_skill
+                    result.difficulty = Difficulty(difficulty)
+                    self._store_question(result)
+                yield (delta, done, result)
+        except Exception as e:
+            logger.error("流式澄清失败: %s", e)
+            yield ("", True, None)
+
     async def generate_switch_question(
         self,
         jd: JD,
@@ -224,6 +300,39 @@ class InterviewerAgent(BaseAgent):
         question.difficulty = Difficulty(difficulty)
         self._store_question(question)
         return question
+
+    async def generate_switch_question_stream(
+        self,
+        jd: JD,
+        resume: Resume,
+        target_skill: str,
+        difficulty: str = "intermediate",
+    ) -> AsyncIterator[tuple[str, bool, Optional[Question]]]:
+        """流式换维度出题：边生成边返回文字块。"""
+        ctx = self._build_context(jd, resume)
+        user_prompt = self._interviewer_prompt_tpl.format(
+            job_title=jd.title,
+            required_skills=ctx["required_skills_str"],
+            candidate_skills=ctx["candidate_skills_str"],
+            candidate_projects=ctx["candidate_projects_str"],
+            target_skill=target_skill,
+            difficulty=difficulty,
+            intent=f"考察 {target_skill} 的基础掌握程度（切换新维度）",
+        )
+        try:
+            async for delta, done, result in super().run_streaming(
+                user_prompt=user_prompt,
+                response_model=Question,
+                system_prompt="你是一个专业的 AI 面试官，请出基础难度的题目评估候选人的真实水平。",
+            ):
+                if done and result is not None:
+                    result.skill = target_skill
+                    result.difficulty = Difficulty(difficulty)
+                    self._store_question(result)
+                yield (delta, done, result)
+        except Exception as e:
+            logger.error("流式换题失败: %s", e)
+            yield ("", True, None)
 
     async def judge_answer(
         self,

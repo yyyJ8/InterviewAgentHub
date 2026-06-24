@@ -3,18 +3,37 @@ from __future__ import annotations
 from models.jd import JD, Skill
 from models.resume import Resume, SkillProficiency
 
+# ── 工具/基础设施关键词（这些技能排在核心开发技能之后）──
+_TOOL_KEYWORDS: set[str] = {
+    "docker", "kubernetes", "k8s",
+    "git", "svn",
+    "linux", "unix", "shell",
+    "jenkins", "ci/cd", "github actions", "gitlab ci",
+    "nginx", "apache", "tomcat",
+    "maven", "gradle", "npm", "pip", "yarn",
+    "idea", "intellij", "eclipse", "vscode", "visual studio",
+    "postman", "swagger",
+    "jira", "confluence",
+}
+
+
+def _is_tool_skill(name: str) -> bool:
+    """判断是否为工具链/基础设施技能（非核心开发技能）。"""
+    return name.strip().lower() in _TOOL_KEYWORDS
+
 
 def rank_skills(jd: JD, resume: Resume) -> list[dict]:
     """将 JD 技能按面试考察优先级排序
 
-    排序策略（DESIGN.md §4）：
-    1. 先排有项目经验支撑的技能（候选人能展开聊）
-    2. 再排有技能但无项目经验的
-    3. 再排缺口技能（JD 要求但简历未提及的）
-    4. 加分技能排在最后
+    排序策略：
+    1. 核心开发技能 + 有项目经验（候选人能展开聊）
+    2. 核心开发技能 + 有技能无项目
+    3. 核心开发技能 + 缺口
+    4. 工具/基础设施技能（Docker/Git/Linux 等，降低优先级）
+    5. 加分技能排在最后
 
     返回列表，每项包含：
-        skill, weight, level, gap, reason, priority[, is_bonus]
+        skill, weight, level, gap, reason, priority[, is_bonus, is_tool]
     """
     resume_skill_map: dict[str, SkillProficiency] = {
         s.name.lower(): s for s in resume.skills
@@ -34,6 +53,7 @@ def rank_skills(jd: JD, resume: Resume) -> list[dict]:
             "level": level,
             "gap": gap,
             "reason": reason,
+            "is_tool": _is_tool_skill(skill.name),
         })
 
     for skill in jd.bonus_skills:
@@ -45,9 +65,10 @@ def rank_skills(jd: JD, resume: Resume) -> list[dict]:
             "gap": gap,
             "reason": reason,
             "is_bonus": True,
+            "is_tool": _is_tool_skill(skill.name),
         })
 
-    # 排序：(有项目经验? 0:1, 缺口? 1:0, weight desc)
+    # 排序：核心优先于工具，有项目经验优先于缺口，权重降序
     ranked.sort(key=_sort_key)
     for i, item in enumerate(ranked, 1):
         item["priority"] = i
@@ -56,9 +77,15 @@ def rank_skills(jd: JD, resume: Resume) -> list[dict]:
 
 
 def _sort_key(item: dict) -> tuple:
-    has_project = item.get("gap") in ("有项目经验",)
-    is_gap = item.get("gap") == "缺口"
-    return (0 if has_project else 1, 1 if is_gap else 0, -item["weight"])
+    """排序键：(is_tool, is_gap_or_bonus, has_project, -weight)
+
+    is_tool=1 的工具技能排在 is_tool=0 的核心技能之后。
+    """
+    is_tool = 1 if item.get("is_tool") else 0
+    is_bonus = 1 if item.get("is_bonus") else 0
+    has_project = 0 if item.get("gap") in ("有项目经验",) else 1
+    is_gap = 1 if item.get("gap") == "缺口" else 0
+    return (is_tool, is_bonus, is_gap, has_project, -item["weight"])
 
 
 def _assess_gap(

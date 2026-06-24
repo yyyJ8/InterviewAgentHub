@@ -1,63 +1,63 @@
-"""AI 面试官 — Gradio Web UI（Phase 5 优化版）
+"""AI 面试官 — Gradio Web UI（Phase 6 前后端分离）
 
 基于 Gradio 5 Blocks，三步流程：
   1. 上传 JD + 简历 → 点击开始
-  2. 面试对话（题目 ↔ 回答 ↔ 评分 → 下一题）
+  2. 面试对话（流式题目 ↔ 回答 ↔ 评分 → 下一题）
   3. 面试报告展示
 
-Phase 5 改进：
-  - 原生 async def 回调，消除 _async() 反模式
-  - 统一使用 orchestration/supervisor 的状态机（与 Gateway 一致）
-  - 首道面试题流式输出，打字机效果
+Phase 6 改进：
+  - 前端不再直接调 Agent/supervisor，所有编排走 Gateway HTTP API
+  - 全部题目支持 SSE 流式输出
+  - 前端只负责界面展示，不持有业务逻辑
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 import uuid
+from pathlib import Path
 
 import gradio as gr
+import httpx
 
-from agents.interviewer import InterviewerAgent
-from agents.feedback import FeedbackAgent
-from memory.session_store import SessionStore
-from orchestration.supervisor import (
-    init_interview,
-    generate_next_question,
-    judge_and_decide,
-    store_interview_memory,
-)
-from tools import parse_file, ParseError
 from config import config
 
 logger = logging.getLogger("web.ui")
 
+GATEWAY_BASE = f"http://127.0.0.1:{config.gateway_port}"
 
-# ── 工具函数 ─────────────────────────────────────────────
+UPLOADS_DIR = Path("uploads")
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+
+def _gateway_url(path: str) -> str:
+    return f"{GATEWAY_BASE}{path}"
+
 
 def _extract_file_path(file_obj) -> str:
     """从 Gradio 5 的各种返回类型中提取文件路径。"""
     if isinstance(file_obj, str):
         return file_obj
-    path = getattr(file_obj, 'path', None) or getattr(file_obj, 'name', None)
+    path = getattr(file_obj, "path", None) or getattr(file_obj, "name", None)
     if path:
         return str(path)
-    raise ParseError(f"无法提取文件路径: {type(file_obj).__name__}")
+    raise ValueError(f"无法提取文件路径: {type(file_obj).__name__}")
 
 
-def _skill_difficulty(item: dict) -> str:
-    """根据技能缺口决定初始难度。"""
-    gap = item.get("gap", "")
-    return "intermediate" if gap == "有项目经验" else "basic"
+# ── 显示辅助函数 ───────────────────────────────────────────
 
+def _build_info_text(jd: dict, resume: dict, gap: dict) -> str:
+    """构建能力缺口分析文本。"""
+    jd_title = jd.get("title", "") if jd else ""
+    resume_name = resume.get("name", "") if resume else ""
+    resume_exp = resume.get("experience_years", "未知") if resume else "未知"
 
-# ── 界面文本构建 ─────────────────────────────────────────
-
-def _build_info_text(jd, resume, gap) -> str:
     info_text = (
-        f"## 🎯 {jd.title}\n\n"
-        f"**候选人**: {resume.name}  |  "
-        f"**经验**: {resume.experience_years or '未知'} 年\n\n---\n"
+        f"## 🎯 {jd_title}\n\n"
+        f"**候选人**: {resume_name}  |  "
+        f"**经验**: {resume_exp} 年\n\n---\n"
         "### 📊 能力缺口分析\n\n"
     )
     for item in gap.get("ordered_skills", []):
@@ -73,35 +73,32 @@ def _build_info_text(jd, resume, gap) -> str:
 
 
 def _build_progress_text(state: dict) -> str:
-    completed = len(state.get("rounds", []))
-    total_skills = len(state.get("ordered_skills", []))
-    current_idx = state.get("current_skill_index", 0) + 1
+    """构建进度信息。"""
+    rounds_cache = state.get("rounds_cache", [])
+    completed = len(rounds_cache)
+    skills_ordered = state.get("skills_ordered", [])
+    total_skills = len(skills_ordered)
     return (
         f"---\n"
         f"📊 **已完成 {completed} 轮  |  "
-        f"技能 {min(current_idx, total_skills)}/{total_skills}**\n"
+        f"技能 {min(completed, total_skills)}/{total_skills}**\n"
         f"---"
     )
 
 
 def _build_chat_history(state: dict) -> list:
-    """Gradio 5 Chatbot 格式: [(role, content), ...]
-
-    兼容 RoundRecord (Pydantic) 和 dict 两种格式。
-    """
+    """构建 Gradio 5 Chatbot 格式: [(role, content), ...]。"""
     chat = []
-    for r in state.get("rounds", []):
-        # 兼容 Pydantic 对象和 dict
-        if hasattr(r, "question"):
-            q, a_text, j = r.question, r.answer, r.judge
-        elif isinstance(r, dict):
-            q, a_text, j = r.get("question"), r.get("answer", ""), r.get("judge")
-        else:
+    for r in state.get("rounds_cache", []):
+        if not isinstance(r, dict):
             continue
+        q = r.get("question", {}) or {}
+        a_text = r.get("answer", "")
+        j = r.get("judge", {}) or {}
 
-        q_text = q.content if hasattr(q, "content") else q.get("content", "") if q else ""
-        score = j.score if hasattr(j, "score") else j.get("score", 0) if j else 0
-        comment = j.comment if hasattr(j, "comment") else j.get("comment", "") if j else ""
+        q_text = q.get("content", "") if isinstance(q, dict) else ""
+        score = j.get("score", 0) if isinstance(j, dict) else 0
+        comment = j.get("comment", "") if isinstance(j, dict) else ""
 
         if q_text:
             chat.append(("🤖 面试官", q_text))
@@ -112,65 +109,46 @@ def _build_chat_history(state: dict) -> list:
     return chat
 
 
-# ── 报告渲染 ─────────────────────────────────────────────
-
 def _render_report_md(state: dict) -> str:
+    """渲染面试报告为 Markdown。"""
     if state is None or state.get("report") is None:
         return "暂无报告"
 
     report = state["report"]
-    rounds = state.get("rounds", [])
+    rounds = state.get("rounds_cache", [])
 
     lines = ["# 📋 面试报告\n"]
-    jd = state.get("jd")
-    resume = state.get("resume")
-    if jd and resume:
-        lines.append(
-            f"**岗位**: {jd.title}  |  **候选人**: {resume.name}\n"
-        )
+    jd = state.get("jd", {})
+    resume = state.get("resume", {})
+    jd_title = jd.get("title", "") if jd else ""
+    resume_name = resume.get("name", "") if resume else ""
+    if jd_title or resume_name:
+        lines.append(f"**岗位**: {jd_title}  |  **候选人**: {resume_name}\n")
 
-    score = (
-        report.total_score if hasattr(report, "total_score")
-        else report.get("total_score", 0)
-    )
+    score = report.get("total_score", 0) if isinstance(report, dict) else 0
     emoji = "🟢" if score >= 70 else ("🟡" if score >= 50 else "🔴")
     lines.append(f"## {emoji} 总分: {score:.0f}/100\n")
 
-    rec = (
-        report.hiring_recommendation if hasattr(report, "hiring_recommendation")
-        else report.get("hiring_recommendation", "")
-    )
+    rec = report.get("hiring_recommendation", "") if isinstance(report, dict) else ""
     rec_map = {
         "strong_yes": "✅ 强烈推荐", "yes": "👍 推荐录用",
         "hesitate": "🤔 待定", "no": "❌ 不推荐",
     }
     lines.append(f"**录用建议**: {rec_map.get(rec, rec)}\n")
 
-    overall = (
-        report.overall_assessment if hasattr(report, "overall_assessment")
-        else report.get("overall_assessment", "")
-    )
+    overall = report.get("overall_assessment", "") if isinstance(report, dict) else ""
     if overall:
         lines.append(f"**总体评价**: {overall}\n")
 
-    dims = (
-        report.dimension_scores if hasattr(report, "dimension_scores")
-        else report.get("dimension_scores", {})
-    )
+    dims = report.get("dimension_scores", {}) if isinstance(report, dict) else {}
     if dims:
         lines.append("### 🎯 五维度评估\n")
         for dim, s in dims.items():
             bar = "█" * int(s / 5) + "░" * (20 - int(s / 5))
             lines.append(f"- **{dim}**: {bar} {s:.0f}/100")
 
-    strengths = (
-        report.strengths if hasattr(report, "strengths")
-        else report.get("strengths", [])
-    )
-    weaknesses = (
-        report.weaknesses if hasattr(report, "weaknesses")
-        else report.get("weaknesses", [])
-    )
+    strengths = report.get("strengths", []) if isinstance(report, dict) else []
+    weaknesses = report.get("weaknesses", []) if isinstance(report, dict) else []
     if strengths:
         lines.append("\n### 🌟 亮点\n")
         for s_item in strengths:
@@ -180,10 +158,7 @@ def _render_report_md(state: dict) -> str:
         for w in weaknesses:
             lines.append(f"- ⚠️ {w}")
 
-    suggestions = (
-        report.suggestions if hasattr(report, "suggestions")
-        else report.get("suggestions", [])
-    )
+    suggestions = report.get("suggestions", []) if isinstance(report, dict) else []
     if suggestions:
         lines.append("\n### 💡 改进建议\n")
         for s_item in suggestions:
@@ -191,86 +166,29 @@ def _render_report_md(state: dict) -> str:
 
     lines.append("\n---\n### 💬 面试全程回顾\n")
     for i, r in enumerate(rounds, 1):
-        # 兼容 Pydantic 和 dict
-        if hasattr(r, "question"):
-            q, a_text, j = r.question, r.answer, r.judge
-        elif isinstance(r, dict):
-            q, a_text, j = r["question"], r.get("answer", ""), r.get("judge")
-        else:
+        if not isinstance(r, dict):
             continue
+        q = r.get("question", {}) or {}
+        a_text = r.get("answer", "")
+        j = r.get("judge", {}) or {}
 
-        q_content = q.content if hasattr(q, "content") else q.get("content", "")
-        s = j.score if hasattr(j, "score") else j.get("score", 0) if j else 0
-        diff_val = (
-            q.difficulty.value if hasattr(q.difficulty, "value")
-            else q.get("difficulty", "")
-        )
-        lines.append(
-            f"**第 {i} 轮** — {q.skill if hasattr(q, 'skill') else q.get('skill', '')} "
-            f"({diff_val}) — {s}/100"
-        )
+        q_content = q.get("content", "") if isinstance(q, dict) else ""
+        s = j.get("score", 0) if isinstance(j, dict) else 0
+        diff_val = q.get("difficulty", "") if isinstance(q, dict) else ""
+        skill_name = q.get("skill", "") if isinstance(q, dict) else r.get("skill", "")
+
+        lines.append(f"**第 {i} 轮** — {skill_name} ({diff_val}) — {s}/100")
         lines.append(f"> 🤖 {q_content[:150]}...")
-        lines.append(
-            f"> 🧑‍💻 {a_text[:150] if a_text else '(未作答)'}"
-        )
+        lines.append(f"> 🧑‍💻 {a_text[:150] if a_text else '(未作答)'}")
         lines.append("")
 
     return "\n".join(lines)
 
 
-# ── 异步业务函数 ─────────────────────────────────────────
-
-def _save_session(state: dict) -> None:
-    """将面试状态保存到 SessionStore（JSON 文件持久化）。"""
-    try:
-        from models.interview import InterviewState, InterviewStatus
-        from models.question import RoundState as PyRoundState
-
-        rounds = []
-        for r in state.get("rounds", []):
-            if hasattr(r, "model_dump"):
-                rounds.append(PyRoundState(**r.model_dump()))
-            elif isinstance(r, dict):
-                rounds.append(PyRoundState(**r))
-
-        pydantic_state = InterviewState(
-            interview_id=state.get("interview_id", ""),
-            status=(
-                InterviewStatus.COMPLETED if state.get("terminated")
-                else InterviewStatus.IN_PROGRESS
-            ),
-            jd=state.get("jd"),
-            resume=state.get("resume"),
-            gap_analysis=state.get("gap_map"),
-            rounds=rounds,
-            current_round=state.get("current_round_number", 0),
-            candidate_name=state.get("candidate_name", "匿名"),
-        )
-        SessionStore().save(pydantic_state)
-    except Exception:
-        pass  # 存储失败不影响面试流程
-
-
-async def _generate_report(state: dict) -> dict:
-    """生成面试报告。"""
-    agent = FeedbackAgent()
-    report = await agent.generate_report(
-        jd=state["jd"],
-        resume=state["resume"],
-        rounds=state["rounds"],
-    )
-    state["report"] = report
-    return state
-
-
-# ── Gradio 回调 ──────────────────────────────────────────
+# ── Gradio 回调 ────────────────────────────────────────────
 
 async def on_start(jd_file, resume_file):
-    """Generator: 逐步 yield 进度，UI 实时更新。
-
-    流程：
-      1. 解析文件 → 2. 初始化面试（supervisor）→ 3. 流式出第一题
-    """
+    """如  Generator: 逐步 yield 进度，UI 实时更新。"""
     if jd_file is None or resume_file is None:
         yield (
             None, None,
@@ -284,7 +202,13 @@ async def on_start(jd_file, resume_file):
         jd_path = _extract_file_path(jd_file)
         resume_path = _extract_file_path(resume_file)
 
-        # ── Step 1: 解析文件 ──
+        # 复制文件到持久化目录（gradio 临时文件可能被清理）
+        persistent_jd = UPLOADS_DIR / f"jd_{uuid.uuid4().hex[:8]}{Path(jd_path).suffix}"
+        persistent_resume = UPLOADS_DIR / f"resume_{uuid.uuid4().hex[:8]}{Path(resume_path).suffix}"
+        shutil.copy2(jd_path, persistent_jd)
+        shutil.copy2(resume_path, persistent_resume)
+
+        # ── Step 1: 解析文件进度提示 ──
         yield (
             None, "📄 正在解析文件...",
             [("系统", "📄 正在解析 JD 和简历文件...")], "",
@@ -292,26 +216,48 @@ async def on_start(jd_file, resume_file):
             gr.update(visible=False),
         )
 
-        # ── Step 2: 初始化面试（LLM 解析 JD + 简历 + 技能匹配）──
+        # ── Step 2: 初始化面试 ──
         yield (
             None, "🤖 正在分析岗位需求与候选人背景...",
             [("系统", "🤖 AI 正在提取 JD 技能、分析简历、匹配缺口...")], "",
             gr.update(visible=True), gr.update(visible=False),
             gr.update(visible=False),
         )
-        state = await init_interview(jd_path, resume_path)
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                _gateway_url("/api/v1/interview"),
+                json={
+                    "jd_path": str(persistent_jd),
+                    "resume_path": str(persistent_resume),
+                    "candidate_name": "匿名",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-        jd = state["jd"]
-        resume = state["resume"]
-        gap_map = state["gap_map"]
-        ordered = state["ordered_skills"]
+        interview_id = data["interview_id"]
+        jd = data.get("jd", {})
+        resume = data.get("resume", {})
+        gap_analysis = data.get("gap_analysis", {})
+        skills_ordered = data.get("skills_ordered", [])
 
-        state["candidate_name"] = resume.name
-        state["interview_id"] = uuid.uuid4().hex[:8]
+        state = {
+            "interview_id": interview_id,
+            "candidate_name": data.get("candidate_name", "匿名"),
+            "jd": jd,
+            "resume": resume,
+            "gap_analysis": gap_analysis,
+            "skills_ordered": skills_ordered,
+            "rounds_cache": [],
+            "terminated": False,
+            "report": None,
+        }
 
-        if not ordered:
+        info_text = _build_info_text(jd, resume, gap_analysis)
+
+        if not skills_ordered:
             yield (
-                state, _build_info_text(jd, resume, gap_map),
+                state, info_text,
                 [("系统", "未找到需要考察的技能维度，请检查 JD 内容")], "",
                 gr.update(visible=False), gr.update(visible=True),
                 gr.update(visible=False),
@@ -319,44 +265,43 @@ async def on_start(jd_file, resume_file):
             return
 
         # ── Step 3: 流式出第一题 ──
-        skill_item = ordered[0]
-        skill_name = skill_item["skill"]
-        difficulty = _skill_difficulty(skill_item)
-        intent = skill_item.get("reason", f"考察 {skill_name}")
-
-        interviewer = InterviewerAgent()
         question_text = ""
-        question_obj = None
 
-        async for delta, done, result in interviewer.generate_question_stream(
-            jd=jd, resume=resume,
-            target_skill=skill_name,
-            difficulty=difficulty,
-            intent=intent,
-            candidate_name=resume.name,
-        ):
-            if not done:
-                question_text += delta
-                # 流式：实时更新聊天区，模拟打字效果
-                yield (
-                    state,
-                    _build_info_text(jd, resume, gap_map),
-                    [("🤖 面试官", question_text + " ▌")],
-                    "",
-                    gr.update(visible=False), gr.update(visible=True),
-                    gr.update(visible=False),
-                )
-            else:
-                question_obj = result
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream(
+                "GET", _gateway_url(f"/api/v1/interview/{interview_id}/stream-question"),
+            ) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(f"流式出题失败: HTTP {response.status_code}")
 
-        if question_obj is None:
-            raise RuntimeError("流式出题失败：LLM 未返回有效结果")
+                current_event = None
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("event: "):
+                        current_event = line[7:]
+                    elif line.startswith("data: "):
+                        payload = line[6:]
+                        if current_event == "token":
+                            question_text += payload
+                            yield (
+                                state, info_text,
+                                [("🤖 面试官", question_text + " ▌")],
+                                "",
+                                gr.update(visible=False), gr.update(visible=True),
+                                gr.update(visible=False),
+                            )
+                        elif current_event == "complete":
+                            try:
+                                question_obj = json.loads(payload)
+                                question_text = question_obj.get("content", question_text)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        elif current_event == "error":
+                            raise RuntimeError(payload)
 
-        state["question"] = question_obj
-
-        # ── 最终状态 ──
-        info_text = _build_info_text(jd, resume, gap_map)
-        chat = [("🤖 面试官", question_obj.content)]
+        chat = [("🤖 面试官", question_text)]
         progress = _build_progress_text(state)
         if progress:
             chat.append(("📊 进度", progress))
@@ -367,13 +312,6 @@ async def on_start(jd_file, resume_file):
             gr.update(visible=False),
         )
 
-    except ParseError as e:
-        yield (
-            None, f"❌ 文件解析失败: {e}",
-            [("系统", f"❌ {e}")], "",
-            gr.update(visible=True), gr.update(visible=False),
-            gr.update(visible=False),
-        )
     except Exception as e:
         logger.exception("初始化失败")
         yield (
@@ -385,50 +323,107 @@ async def on_start(jd_file, resume_file):
 
 
 async def on_submit(answer, state):
-    """提交回答 → 评判 → 出下一题 / 生成报告。
-
-    使用 supervisor 的 judge_and_decide + generate_next_question。
-    """
+    """提交回答 → 评判 → 出下一题 / 生成报告。"""
     if state is None:
-        return (
+        yield (
             state, [("系统", "请先开始面试")], "", "",
             gr.update(visible=True), gr.update(visible=False),
         )
+        return
 
-    if not answer.strip():
-        answer = "（跳过）"
+    interview_id = state.get("interview_id", "")
+    if not interview_id:
+        yield (
+            state, [("系统", "面试 ID 丢失，请重新开始")], "", "",
+            gr.update(visible=True), gr.update(visible=False),
+        )
+        return
 
     try:
-        # ── 评判 + 决策 ──
-        state = await judge_and_decide(state, answer)
-        chat = _build_chat_history(state)
+        # ── 提交评判 ──
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            judge_resp = await client.post(
+                _gateway_url(f"/api/v1/interview/{interview_id}/judge"),
+                json={"answer": answer or ""},
+            )
+            judge_resp.raise_for_status()
+            judge_data = judge_resp.json()
 
+        state["terminated"] = judge_data.get("terminated", False)
+        if "rounds" in judge_data:
+            state["rounds_cache"] = judge_data["rounds"]
+
+        chat = _build_chat_history(state)
         progress = _build_progress_text(state)
         if progress:
             chat.append(("📊 进度", progress))
 
-        # ── 终止？→ 生成报告 ──
-        if state.get("terminated"):
-            state = await _generate_report(state)
-            _save_session(state)
-            store_interview_memory(state)
+        # ── 终止 → 获取报告 ──
+        if state["terminated"]:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                report_resp = await client.get(
+                    _gateway_url(f"/api/v1/interview/{interview_id}/report"),
+                )
+                report_resp.raise_for_status()
+                report_data = report_resp.json()
+
+            state["report"] = report_data.get("report")
+            if "rounds" in report_data:
+                state["rounds_cache"] = report_data["rounds"]
+
+            chat = _build_chat_history(state)
+            progress = _build_progress_text(state)
+            if progress:
+                chat.append(("📊 进度", progress))
             report_text = _render_report_md(state)
-            return (
+            yield (
                 state, chat, "", report_text,
                 gr.update(visible=False), gr.update(visible=True),
             )
+            return
 
-        # ── 继续 → 生成下一题 ──
-        state = await generate_next_question(state)
-        q = state.get("question")
-        if q:
-            q_text = q.content if hasattr(q, "content") else str(q)
-            chat.append(("🤖 面试官", q_text))
+        # ── 继续 → 流式出下一题 ──
+        question_text = ""
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream(
+                "GET", _gateway_url(f"/api/v1/interview/{interview_id}/stream-question"),
+            ) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(f"流式出题失败: HTTP {response.status_code}")
+
+                current_event = None
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("event: "):
+                        current_event = line[7:]
+                    elif line.startswith("data: "):
+                        payload = line[6:]
+                        if current_event == "token":
+                            question_text += payload
+                            display_chat = list(chat)
+                            display_chat.append(("🤖 面试官", question_text + " ▌"))
+                            yield (
+                                state, display_chat, "", "",
+                                gr.update(visible=True), gr.update(visible=False),
+                            )
+                        elif current_event == "complete":
+                            try:
+                                question_obj = json.loads(payload)
+                                question_text = question_obj.get("content", question_text)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        elif current_event == "error":
+                            raise RuntimeError(payload)
+
+        if question_text:
+            chat.append(("🤖 面试官", question_text))
             new_progress = _build_progress_text(state)
             if new_progress:
                 chat.append(("📊 进度", new_progress))
 
-        return (
+        yield (
             state, chat, "", "",
             gr.update(visible=True), gr.update(visible=False),
         )
@@ -437,26 +432,39 @@ async def on_submit(answer, state):
         logger.exception("面试对话失败")
         chat = _build_chat_history(state)
         chat.append(("系统", f"❌ 出错: {e}"))
-        return (
+        yield (
             state, chat, "", "",
             gr.update(visible=True), gr.update(visible=False),
         )
 
 
 async def _end_interview(state):
-    """手动结束面试 → 生成报告。"""
+    """手动结束面试 → 获取报告。"""
     if state is None:
         return (
             state, [], "", "",
             gr.update(visible=True), gr.update(visible=False),
         )
 
-    state["terminated"] = True
+    interview_id = state.get("interview_id", "")
+    if not interview_id:
+        return (
+            state, [], "", "",
+            gr.update(visible=True), gr.update(visible=False),
+        )
 
     try:
-        state = await _generate_report(state)
-        _save_session(state)
-        store_interview_memory(state)
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            report_resp = await client.get(
+                _gateway_url(f"/api/v1/interview/{interview_id}/report"),
+            )
+            report_resp.raise_for_status()
+            report_data = report_resp.json()
+
+        state["report"] = report_data.get("report")
+        state["terminated"] = True
+        if "rounds" in report_data:
+            state["rounds_cache"] = report_data["rounds"]
     except Exception as e:
         logger.error("生成报告失败: %s", e)
 

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -330,12 +331,13 @@ async def mcp_sse_endpoint(request: Request, _auth=Depends(verify_auth)):
 
 @app.post("/api/v1/interview")
 async def create_interview(body: dict, _auth=Depends(verify_auth)):
-    """创建面试会话。
+    """创建面试会话（仅解析+匹配，不出题）。
 
-    Request:  {"jd_path": "...", "resume_path": "..."}
-    Response: {"interview_id": "...", "question": {...}, "state": {...}}
+    Request:  {"jd_path": "...", "resume_path": "...", "candidate_name": "..."}
+    Response: {"interview_id": "...", "jd": {...}, "resume": {...},
+               "gap_analysis": {...}, "skills_ordered": [...], "state_summary": {...}}
     """
-    from orchestration.supervisor import init_interview, generate_next_question
+    from orchestration.supervisor import init_interview
 
     jd_path = body.get("jd_path", "")
     resume_path = body.get("resume_path", "")
@@ -343,22 +345,27 @@ async def create_interview(body: dict, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=400, detail="需要 jd_path 和 resume_path")
 
     try:
-        # Phase 1: 解析 + 匹配
+        # 仅解析 + 匹配，不出题
         state = await init_interview(jd_path, resume_path)
 
-        # Phase 2: 生成第一题
         state["candidate_name"] = body.get("candidate_name", "匿名")
-        state = await generate_next_question(state)
 
         # 保存到 SessionStore
         store: SessionStore = app.state.session_store
         interview_id = store.save(_state_to_pydantic(state))
         state["interview_id"] = interview_id
 
-        question = state.get("question")
+        jd = state.get("jd")
+        resume = state.get("resume")
+        gap_map = state.get("gap_map", {})
+
         return {
             "interview_id": interview_id,
-            "question": question.model_dump() if question else None,
+            "candidate_name": state["candidate_name"],
+            "jd": _serialize_model(jd) if jd else None,
+            "resume": _serialize_model(resume) if resume else None,
+            "gap_analysis": gap_map,
+            "skills_ordered": [s["skill"] for s in gap_map.get("ordered_skills", [])],
             "state_summary": _state_summary(state),
         }
     except Exception as e:
@@ -366,14 +373,53 @@ async def create_interview(body: dict, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/interview/{interview_id}/talk")
-async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_auth)):
-    """提交回答，返回评判结果 + 下一题。
+@app.get("/api/v1/interview/{interview_id}/stream-question")
+async def stream_question(interview_id: str, request: Request, _auth=Depends(verify_auth)):
+    """SSE 流式出题端点。
+
+    自动判断路由：无轮次 → 首题；有最后一轮 judge → 按 next_action 出题。
+    """
+    from orchestration.supervisor import generate_next_question_stream
+
+    store: SessionStore = app.state.session_store
+    pydantic_state = store.load(interview_id)
+    if pydantic_state is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    state = _pydantic_to_state(pydantic_state)
+
+    async def event_stream():
+        try:
+            async for chunk in generate_next_question_stream(state):
+                if isinstance(chunk, str):
+                    yield {"event": "token", "data": chunk}
+                elif chunk is not None:
+                    q_data = chunk.model_dump(mode="json") if hasattr(chunk, "model_dump") else chunk
+                    yield {"event": "complete", "data": json.dumps(q_data, ensure_ascii=False)}
+                    # 流式完成后保存 state
+                    pydantic_state2 = _state_to_pydantic(state)
+                    pydantic_state2.interview_id = interview_id
+                    store.save(pydantic_state2)
+                    return
+                else:
+                    # chunk is None → stream failed
+                    yield {"event": "error", "data": "流式出题失败：LLM 未返回有效结果"}
+                    return
+        except Exception as e:
+            logger.exception("流式出题失败")
+            yield {"event": "error", "data": str(e)}
+
+    return EventSourceResponse(event_stream())
+
+
+@app.post("/api/v1/interview/{interview_id}/judge")
+async def judge_answer(interview_id: str, body: dict, _auth=Depends(verify_auth)):
+    """评判候选人回答（不出题）。
 
     Request:  {"answer": "..."}
-    Response: {"judge": {...}, "next_question": {...} or null, "terminated": bool}
+    Response: {"judge": {...}, "terminated": bool, "rounds": [...], "progress": {...}}
     """
-    from orchestration.supervisor import judge_and_decide, generate_next_question, store_interview_memory
+    from orchestration.supervisor import judge_and_decide, store_interview_memory
 
     answer = body.get("answer", "")
     if answer is None:
@@ -391,12 +437,60 @@ async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_aut
         state = await judge_and_decide(state, answer)
 
         # 检查是否终止
+        terminated = state.get("terminated", False)
+        if terminated:
+            pydantic_state = _state_to_pydantic(state)
+            pydantic_state.interview_id = interview_id
+            pydantic_state.status = InterviewStatus.COMPLETED
+            store.save(pydantic_state)
+            store_interview_memory(state)
+
+        judge_result = state.get("judge_result")
+        ordered = state.get("ordered_skills", [])
+        current_idx = state.get("current_skill_index", 0)
+
+        return {
+            "judge": _serialize_model(judge_result) if judge_result else None,
+            "terminated": terminated,
+            "rounds": _build_rounds_list(state.get("rounds", [])),
+            "progress": {
+                "completed_rounds": state.get("current_round_number", 0),
+                "current_skill": ordered[current_idx]["skill"] if ordered and current_idx < len(ordered) else "",
+                "total_skills": len(ordered),
+                "skills_ordered": [s.get("skill", s) if isinstance(s, dict) else s for s in ordered],
+            },
+            "state_summary": _state_summary(state),
+        }
+    except Exception as e:
+        logger.exception("评判失败")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/interview/{interview_id}/talk")
+async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_auth)):
+    """[已弃用] 提交回答 + 出题。请改用 /judge + /stream-question。"""
+    from orchestration.supervisor import judge_and_decide, generate_next_question, store_interview_memory
+
+    logger.warning("DEPRECATED: /talk 已弃用，请改用 /judge + /stream-question")
+    answer = body.get("answer", "")
+    if answer is None:
+        raise HTTPException(status_code=400, detail="需要 answer 字段")
+
+    store: SessionStore = app.state.session_store
+    pydantic_state = store.load(interview_id)
+    if pydantic_state is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    state = _pydantic_to_state(pydantic_state)
+
+    try:
+        state = await judge_and_decide(state, answer)
+
         if state.get("terminated"):
             pydantic_state = _state_to_pydantic(state)
             pydantic_state.interview_id = interview_id
             pydantic_state.status = InterviewStatus.COMPLETED
             store.save(pydantic_state)
-            # 写入长期记忆（异步降级，不阻塞响应）
             store_interview_memory(state)
             return {
                 "judge": state.get("judge_result").model_dump() if state.get("judge_result") else None,
@@ -405,7 +499,6 @@ async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_aut
                 "state_summary": _state_summary(state),
             }
 
-        # 生成下一题
         state = await generate_next_question(state)
 
         pydantic_state = _state_to_pydantic(state)
@@ -468,8 +561,10 @@ async def get_interview_report(interview_id: str, _auth=Depends(verify_auth)):
 
         return {
             "interview_id": interview_id,
-            "report": report,
+            "report": _serialize_model(report) if hasattr(report, "model_dump") else report,
             "candidate_name": pydantic_state.candidate_name,
+            "jd_title": pydantic_state.jd.title if pydantic_state.jd else "",
+            "rounds": _build_rounds_list(state.get("rounds", [])),
         }
     except Exception as e:
         logger.exception("生成报告失败")
@@ -478,17 +573,51 @@ async def get_interview_report(interview_id: str, _auth=Depends(verify_auth)):
 
 # ── 状态转换辅助 ────────────────────────────────────────
 
+def _serialize_model(obj) -> dict:
+    """安全序列化 Pydantic 模型为 dict。"""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    return obj
+
+
+def _build_rounds_list(rounds: list) -> list[dict]:
+    """将 RoundRecord 列表转为纯 JSON 安全的 dict 列表。"""
+    result = []
+    for r in rounds:
+        if hasattr(r, "model_dump"):
+            d = r.model_dump(mode="json")
+        elif isinstance(r, dict):
+            d = dict(r)
+            if "question" in d and hasattr(d["question"], "model_dump"):
+                d["question"] = d["question"].model_dump(mode="json")
+            if "judge" in d and hasattr(d["judge"], "model_dump"):
+                d["judge"] = d["judge"].model_dump(mode="json")
+        else:
+            continue
+        result.append(d)
+    return result
+
+
 def _state_to_pydantic(state: dict) -> InterviewState:
     """将 TypedDict 状态转为 Pydantic InterviewState（用于序列化存储）。"""
-    from models.question import RoundState as PyRoundState
+    from models.interview import RoundState as PyRoundState
+    from models.question import Answer
 
     rounds = []
     for r in state.get("rounds", []):
         # r 可能是 RoundRecord 或 dict
         if hasattr(r, "model_dump"):
-            rounds.append(PyRoundState(**r.model_dump()))
+            d = r.model_dump()
         elif isinstance(r, dict):
-            rounds.append(PyRoundState(**r))
+            d = dict(r)
+        else:
+            continue
+
+        # answer 字段：RoundRecord 中是 str，RoundState 中需要 Answer 对象
+        if isinstance(d.get("answer"), str):
+            d["answer"] = Answer(content=d["answer"])
+
+        rounds.append(PyRoundState(**d))
 
     return InterviewState(
         interview_id=state.get("interview_id", ""),
@@ -498,6 +627,8 @@ def _state_to_pydantic(state: dict) -> InterviewState:
         gap_analysis=state.get("gap_map"),
         rounds=rounds,
         current_round=state.get("current_round_number", 0),
+        question=state.get("question"),
+        answer=state.get("answer", ""),
         candidate_name=state.get("candidate_name", "匿名"),
     )
 
@@ -508,11 +639,20 @@ def _pydantic_to_state(ps: InterviewState) -> dict:
 
     rounds = []
     for r in ps.rounds:
+        # answer 字段：RoundState 中是 Answer 对象，RoundRecord 中需要 str
+        answer_raw = r.answer
+        if answer_raw is None:
+            answer_str = ""
+        elif hasattr(answer_raw, "content"):
+            answer_str = answer_raw.content
+        else:
+            answer_str = str(answer_raw)
+
         rounds.append(DictRoundRecord(
             round_number=r.round_number,
             skill=r.skill,
             question=r.question,
-            answer=r.answer or "",
+            answer=answer_str,
             judge=r.judge,
         ))
 
@@ -534,8 +674,8 @@ def _pydantic_to_state(ps: InterviewState) -> dict:
         "current_skill_index": 0,
         "rounds": rounds,
         "current_round_number": ps.current_round,
-        "question": rounds[-1].question if rounds else None,
-        "answer": "",
+        "question": ps.question or (rounds[-1].question if rounds else None),
+        "answer": ps.answer or "",
         "judge_result": rounds[-1].judge if rounds else None,
         "consecutive_empty": 0,
         "terminated": ps.status in (InterviewStatus.COMPLETED, InterviewStatus.TERMINATED),

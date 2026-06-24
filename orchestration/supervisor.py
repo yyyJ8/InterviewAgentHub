@@ -429,6 +429,119 @@ async def generate_next_question(state: dict) -> dict:
     return state
 
 
+async def generate_next_question_stream(state: dict):
+    """流式生成下一道面试题，yield token 字符串，最后 yield Question 对象。
+
+    按 judge.next_action 路由到相应的流式 agent 方法。
+    """
+    from agents.interviewer import InterviewerAgent
+
+    jd = state.get("jd")
+    resume = state.get("resume")
+    ordered = state.get("ordered_skills", [])
+    if not jd or not resume or not ordered:
+        raise RuntimeError("缺少 JD、简历或技能列表")
+
+    skill_name, gap, reason = _get_current_skill(state)
+    rounds = state.get("rounds", [])
+    last_round = rounds[-1] if rounds else None
+    agent = InterviewerAgent()
+
+    if last_round and last_round.judge:
+        judge = last_round.judge
+        action = judge.next_action.strip().lower() if hasattr(judge, "next_action") else "continue"
+
+        if action == "deepen":
+            async for delta, done, result in agent.generate_deepen_question_stream(
+                jd=jd, resume=resume,
+                target_skill=skill_name,
+                difficulty=(last_round.question.difficulty.value
+                            if hasattr(last_round.question, "difficulty")
+                            and last_round.question.difficulty
+                            else "intermediate"),
+                previous_question=(last_round.question.content
+                                   if hasattr(last_round.question, "content")
+                                   else ""),
+                previous_answer=last_round.answer or "",
+            ):
+                if not done:
+                    yield delta
+                else:
+                    if result:
+                        state["question"] = result
+                    yield result
+
+        elif action == "clarify":
+            async for delta, done, result in agent.generate_clarify_question_stream(
+                jd=jd, resume=resume,
+                target_skill=skill_name,
+                difficulty=(last_round.question.difficulty.value
+                            if hasattr(last_round.question, "difficulty")
+                            and last_round.question.difficulty
+                            else "intermediate"),
+                previous_question=(last_round.question.content
+                                   if hasattr(last_round.question, "content")
+                                   else ""),
+                previous_answer=last_round.answer or "",
+            ):
+                if not done:
+                    yield delta
+                else:
+                    if result:
+                        state["question"] = result
+                    yield result
+
+        elif action == "switch":
+            new_idx = state.get("current_skill_index", 0) + 1
+            new_skill = ordered[new_idx]["skill"] if new_idx < len(ordered) else skill_name
+            new_diff = _skill_difficulty(ordered[min(new_idx, len(ordered) - 1)])
+            async for delta, done, result in agent.generate_switch_question_stream(
+                jd=jd, resume=resume,
+                target_skill=new_skill,
+                difficulty=new_diff,
+            ):
+                if not done:
+                    yield delta
+                else:
+                    if result:
+                        state["question"] = result
+                        state["current_skill_index"] = new_idx
+                    yield result
+
+        else:
+            # 默认：生成当前技能的新题
+            item = ordered[state.get("current_skill_index", 0)]
+            async for delta, done, result in agent.generate_question_stream(
+                jd=jd, resume=resume,
+                target_skill=item["skill"],
+                difficulty=_skill_difficulty(item),
+                intent=item.get("reason", f"考察 {item['skill']}"),
+                candidate_name=state.get("candidate_name", ""),
+            ):
+                if not done:
+                    yield delta
+                else:
+                    if result:
+                        state["question"] = result
+                    yield result
+    else:
+        # 首次出题
+        item = ordered[state.get("current_skill_index", 0)]
+        async for delta, done, result in agent.generate_question_stream(
+            jd=jd, resume=resume,
+            target_skill=item["skill"],
+            difficulty=_skill_difficulty(item),
+            intent=item.get("reason", f"考察 {item['skill']}"),
+            candidate_name=state.get("candidate_name", ""),
+        ):
+            if not done:
+                yield delta
+            else:
+                if result:
+                    state["question"] = result
+                yield result
+
+
 async def judge_and_decide(state: dict, answer: str) -> dict:
     """评判回答并决定下一步"""
     state["answer"] = answer

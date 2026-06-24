@@ -196,6 +196,17 @@ class BaseAgent:
             except (json.JSONDecodeError, ValueError):
                 pass
 
+        # 尝试挽救截断的 JSON（max_tokens 不够导致被截断）
+        first_brace = text.find("{")
+        if first_brace >= 0:
+            truncated = text[first_brace:]
+            # 从末尾向回退，尝试补 } 后解析
+            for cut in range(len(truncated), max(0, len(truncated) - 500), -1):
+                try:
+                    return model_class.model_validate_json(truncated[:cut] + "}")
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
         raise ValueError(
             f"无法从响应中提取有效 JSON (共 {len(text)} 字符):\n"
             f"---前 300 字符---\n{text[:300]}\n"
