@@ -18,75 +18,44 @@ import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable, Optional
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Mount
 
 from config import config
+from mcp_servers.mcp_aggregator import (
+    MCP_MOUNT_PREFIX,
+    build_aggregate_mcp,
+    session_lifespan,
+)
 from memory.session_store import SessionStore
 from models.interview import InterviewState, InterviewStatus
 
 logger = logging.getLogger("gateway")
 
 # 单一版本来源，避免多处取值不一致
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
-# ── 生命周期（lifespan：替代已弃用的 @app.on_event）──────
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动时注册三个 MCP Server，关闭时记录日志。"""
-    logger.info("=" * 50)
-    logger.info("MCP Gateway 启动中...")
-
-    # JD Server
-    try:
-        from mcp_servers.jd_server import app as jd_app
-        registry.register(jd_app, "jd-server")
-    except Exception as e:
-        logger.error("JD Server 注册失败: %s", e)
-
-    # Resume Server
-    try:
-        from mcp_servers.resume_server import app as resume_app
-        registry.register(resume_app, "resume-server")
-    except Exception as e:
-        logger.error("Resume Server 注册失败: %s", e)
-
-    # Question Bank Server
-    try:
-        from mcp_servers.question_bank_server import app as qb_app
-        registry.register(qb_app, "question-bank-server")
-    except Exception as e:
-        logger.error("Question Bank Server 注册失败: %s", e)
-
-    # Session Store
-    app.state.session_store = SessionStore()
-    logger.info("Gradio Web UI 由 main.py 独立启动（端口 %s），不走 mount", config.gradio_ui_port)
-
-    logger.info("已注册工具: %s", registry.tool_names)
-    logger.info("Gateway 启动完成，监听 %s:%s", config.gateway_host, config.gateway_port)
-    logger.info("=" * 50)
-
-    yield
-
-    logger.info("MCP Gateway 关闭")
-
-
-# ── FastAPI 实例 ────────────────────────────────────────
-
-app = FastAPI(
-    title="AI 面试官 Gateway",
-    version=VERSION,
-    description="MCP Gateway — 统一管理 JD/简历/题库 Server，提供面试 REST API",
-    lifespan=lifespan,
-)
+# ═══════════════════════════════════════════════════════════
+# 基础设施：鉴权 / 限流
+# ═══════════════════════════════════════════════════════════
 
 security = HTTPBearer(auto_error=False)
 
-# ── 限流器 ──────────────────────────────────────────────
+
+def verify_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    """验证 Bearer Token。可通过配置关闭。"""
+    if config.gateway_require_auth:
+        if credentials is None:
+            raise HTTPException(status_code=401, detail="缺少 Authorization header")
+        token = credentials.credentials
+        if token != config.gateway_api_key:
+            raise HTTPException(status_code=401, detail="无效的 API Key")
+    return True
+
 
 class RateLimiter:
     """基于 IP 的令牌桶限流"""
@@ -102,6 +71,7 @@ class RateLimiter:
         stale = [ip for ip, (_, t) in self._buckets.items() if now - t > self._window * 2]
         for ip in stale:
             del self._buckets[ip]
+
 
     def allow(self, ip: str) -> bool:
         """检查 IP 是否允许通过。True = 允许。"""
@@ -248,22 +218,14 @@ class ServerRegistry:
 
 registry = ServerRegistry()
 
-# ── 鉴权依赖 ────────────────────────────────────────────
-
-def verify_auth(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
-    """验证 Bearer Token。可通过配置关闭。"""
-    if config.gateway_require_auth:
-        if credentials is None:
-            raise HTTPException(status_code=401, detail="缺少 Authorization header")
-        token = credentials.credentials
-        if token != config.gateway_api_key:
-            raise HTTPException(status_code=401, detail="无效的 API Key")
-    return True
+# REST 端点统一注册到 router，由 create_app() 挂到应用实例。
+# 这样端点可在 app 实例创建之前定义，避免装配顺序问题。
+router = APIRouter()
 
 
-# ── 限流中间件 ──────────────────────────────────────────
+# ── 限流中间件（在 create_app() 中以 add_middleware 装配）──
 
-# ── 不需要限流的路径前缀 ──
+# 不需要限流的路径前缀
 _RATE_LIMIT_SKIP_PREFIXES = (
     "/health",
     "/ui/assets/",
@@ -272,7 +234,6 @@ _RATE_LIMIT_SKIP_PREFIXES = (
 )
 
 
-@app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     """全局请求限流（跳过健康检查和前端静态资源）"""
     client_ip = request.client.host if request.client else "127.0.0.1"
@@ -288,8 +249,18 @@ async def rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# ── 生命周期 ────────────────────────────────────────────
-# （启动/关闭逻辑已迁移到上方 lifespan，见 FastAPI(lifespan=...)）
+# ── MCP 端点说明 ────────────────────────────────────────
+# POST /mcp/        → MCP Streamable HTTP 协议端点（FastMCP 原生提供，
+#                     由 create_app() 挂载，见 mcp_servers/mcp_aggregator.py）
+# POST /mcp/{tool}  → 运行时直调（私有约定，非 MCP 协议）
+
+@router.post("/mcp/{tool_name}")
+async def call_mcp_tool_runtime(tool_name: str, body: dict, _auth=Depends(verify_auth)):
+    """按工具名直接调用对应 Server 的工具（非 MCP 协议）。"""
+    result = await registry.call_tool(tool_name, **body)
+    if isinstance(result, dict):
+        return result
+    return {"result": result}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -298,7 +269,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 # ── 健康检查 ────────────────────────────────────────────
 
-@app.get("/health")
+@router.get("/health")
 async def health():
     return {
         "status": "ok",
@@ -308,36 +279,18 @@ async def health():
     }
 
 
-# ── MCP 工具调用端点 ────────────────────────────────────
-
-@app.post("/mcp/{tool_name}")
-async def call_mcp_tool(tool_name: str, body: dict, _auth=Depends(verify_auth)):
-    """通用 MCP 工具调用端点。按 tool_name 路由到对应 Server。"""
-    result = await registry.call_tool(tool_name, **body)
-    if isinstance(result, dict):
-        return result
-    return {"result": result}
-
-
-# ── MCP SSE 端点 ────────────────────────────────────────
-
-@app.get("/mcp/sse")
-async def mcp_sse_endpoint(request: Request, _auth=Depends(verify_auth)):
-    """MCP 协议的 SSE transport 端点。"""
-    async def event_stream():
-        yield {"event": "endpoint", "data": "/mcp"}
-        while True:
-            if await request.is_disconnected():
-                break
-            await asyncio.sleep(30)
-
-    return EventSourceResponse(event_stream())
-
+# ── MCP 端点说明 ────────────────────────────────────────
+# POST /mcp/          → MCP Streamable HTTP 协议端点（由 FastMCP 原生提供，
+#                       挂载于 create_app()，见 mcp_servers/mcp_aggregator.py）
+# POST /mcp/{tool}    → 运行时直调（私有约定，非 MCP 协议，注册于 create_app()）
+#
+# 旧版此处有一个 GET /mcp/sse：它只推送 endpoint 事件指向并不存在的 /mcp，
+# 客户端照做会 404。已由上面真正的协议端点取代，故删除。
 
 # ── 面试 REST API ───────────────────────────────────────
 
-@app.post("/api/v1/interview")
-async def create_interview(body: dict, _auth=Depends(verify_auth)):
+@router.post("/api/v1/interview")
+async def create_interview(request: Request, body: dict, _auth=Depends(verify_auth)):
     """创建面试会话（仅解析+匹配，不出题）。
 
     Request:  {"jd_path": "...", "resume_path": "...", "candidate_name": "..."}
@@ -358,7 +311,7 @@ async def create_interview(body: dict, _auth=Depends(verify_auth)):
         state["candidate_name"] = body.get("candidate_name", "匿名")
 
         # 保存到 SessionStore
-        store: SessionStore = app.state.session_store
+        store: SessionStore = request.app.state.session_store
         interview_id = store.save(_state_to_pydantic(state))
         state["interview_id"] = interview_id
 
@@ -380,7 +333,7 @@ async def create_interview(body: dict, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/v1/interview/{interview_id}/stream-question")
+@router.get("/api/v1/interview/{interview_id}/stream-question")
 async def stream_question(interview_id: str, request: Request, _auth=Depends(verify_auth)):
     """SSE 流式出题端点。
 
@@ -388,7 +341,7 @@ async def stream_question(interview_id: str, request: Request, _auth=Depends(ver
     """
     from orchestration.supervisor import generate_next_question_stream
 
-    store: SessionStore = app.state.session_store
+    store: SessionStore = request.app.state.session_store
     pydantic_state = store.load(interview_id)
     if pydantic_state is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -419,8 +372,8 @@ async def stream_question(interview_id: str, request: Request, _auth=Depends(ver
     return EventSourceResponse(event_stream())
 
 
-@app.post("/api/v1/interview/{interview_id}/judge")
-async def judge_answer(interview_id: str, body: dict, _auth=Depends(verify_auth)):
+@router.post("/api/v1/interview/{interview_id}/judge")
+async def judge_answer(interview_id: str, request: Request, body: dict, _auth=Depends(verify_auth)):
     """评判候选人回答（不出题）。
 
     Request:  {"answer": "..."}
@@ -432,7 +385,7 @@ async def judge_answer(interview_id: str, body: dict, _auth=Depends(verify_auth)
     if answer is None or not str(answer).strip():
         raise HTTPException(status_code=400, detail="需要非空的 answer 字段")
 
-    store: SessionStore = app.state.session_store
+    store: SessionStore = request.app.state.session_store
     pydantic_state = store.load(interview_id)
     if pydantic_state is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -476,8 +429,8 @@ async def judge_answer(interview_id: str, body: dict, _auth=Depends(verify_auth)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/interview/{interview_id}/talk")
-async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_auth)):
+@router.post("/api/v1/interview/{interview_id}/talk")
+async def interview_talk(interview_id: str, request: Request, body: dict, _auth=Depends(verify_auth)):
     """[已弃用] 提交回答 + 出题。请改用 /judge + /stream-question。"""
     from orchestration.supervisor import judge_and_decide, generate_next_question, store_interview_memory
 
@@ -486,7 +439,7 @@ async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_aut
     if answer is None or not str(answer).strip():
         raise HTTPException(status_code=400, detail="需要非空的 answer 字段")
 
-    store: SessionStore = app.state.session_store
+    store: SessionStore = request.app.state.session_store
     pydantic_state = store.load(interview_id)
     if pydantic_state is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -526,10 +479,10 @@ async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_aut
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/v1/interview/{interview_id}")
-async def get_interview_state(interview_id: str, _auth=Depends(verify_auth)):
+@router.get("/api/v1/interview/{interview_id}")
+async def get_interview_state(interview_id: str, request: Request, _auth=Depends(verify_auth)):
     """获取会话当前状态。"""
-    store: SessionStore = app.state.session_store
+    store: SessionStore = request.app.state.session_store
     pydantic_state = store.load(interview_id)
     if pydantic_state is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -546,12 +499,12 @@ async def get_interview_state(interview_id: str, _auth=Depends(verify_auth)):
     }
 
 
-@app.get("/api/v1/interview/{interview_id}/report")
-async def get_interview_report(interview_id: str, _auth=Depends(verify_auth)):
+@router.get("/api/v1/interview/{interview_id}/report")
+async def get_interview_report(interview_id: str, request: Request, _auth=Depends(verify_auth)):
     """获取面试报告。"""
     from agents.feedback import FeedbackAgent
 
-    store: SessionStore = app.state.session_store
+    store: SessionStore = request.app.state.session_store
     pydantic_state = store.load(interview_id)
     if pydantic_state is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -707,3 +660,77 @@ def _state_summary(state: dict) -> dict:
         "terminated": state.get("terminated", False),
         "candidate_name": state.get("candidate_name", "匿名"),
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# 装配：lifespan + 应用工厂 + 模块级实例
+# ═══════════════════════════════════════════════════════════
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """启动时注册 MCP Server 与协议端点，关闭时清理。
+
+    MCP 的 Streamable HTTP session manager 必须在外层 lifespan 中运行：
+    Starlette 的 Mount 不会执行子应用自身的 lifespan。
+    """
+    from mcp_servers.jd_server import app as jd_server
+    from mcp_servers.question_bank_server import app as qb_server
+    from mcp_servers.resume_server import app as resume_server
+
+    logger.info("=" * 50)
+    logger.info("MCP Gateway 启动中...")
+
+    # 三个源 Server 注册进 registry（供运行时直调与熔断保护使用）
+    for server, label in (
+        (jd_server, "jd-server"),
+        (resume_server, "resume-server"),
+        (qb_server, "question-bank-server"),
+    ):
+        try:
+            registry.register(server, label)
+        except Exception as e:  # noqa: BLE001 - 单个 Server 失败不应阻断启动
+            logger.error("%s 注册失败: %s", label, e)
+
+    app.state.session_store = SessionStore()
+    logger.info("Gradio Web UI 由 main.py 独立启动（端口 %s），不走 mount", config.gradio_ui_port)
+    logger.info("已注册工具: %s", registry.tool_names)
+
+    # MCP 协议端点随本应用一起存活
+    async with session_lifespan(app.state.mcp):
+        logger.info("MCP 协议端点已就绪: POST %s/", MCP_MOUNT_PREFIX)
+        logger.info("Gateway 启动完成，监听 %s:%s", config.gateway_host, config.gateway_port)
+        logger.info("=" * 50)
+        yield
+
+    logger.info("MCP Gateway 关闭")
+
+
+def create_app() -> FastAPI:
+    """构造 Gateway 应用（REST API + MCP 协议端点）。
+
+    独立成工厂函数的原因：FastMCP 的 session_manager.run() 每个实例只能调用一次，
+    测试需要构造互不干扰的新实例。
+    """
+    aggregate_mcp = build_aggregate_mcp(extra_hosts=[config.gateway_host])
+    mcp_sub_app = aggregate_mcp.streamable_http_app()
+
+    application = FastAPI(
+        title="AI 面试官 Gateway",
+        version=VERSION,
+        description="MCP Gateway — 统一管理 JD/简历/题库 Server，提供面试 REST API 与 MCP 协议端点",
+        lifespan=lifespan,
+    )
+    application.state.mcp = aggregate_mcp
+    application.add_middleware(BaseHTTPMiddleware, dispatch=rate_limit_middleware)
+    application.include_router(router)
+
+    # FastMCP 的 Streamable HTTP 子应用挂到 /mcp。
+    # 子应用内部路径已设为 "/"，因此对外端点正好是 /mcp/；
+    # /mcp/{tool_name} 运行时直调端点（注册在 router 上）与其共存。
+    application.router.routes.append(Mount(MCP_MOUNT_PREFIX, app=mcp_sub_app))
+
+    return application
+
+
+# uvicorn 指向 "mcp_servers.gateway:app"，测试也可直接导入。
+app = create_app()

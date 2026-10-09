@@ -6,7 +6,9 @@ langgraph>=0.2.0
 langgraph-checkpoint>=0.1.0
 
 # MCP Protocol
-mcp>=1.0.0
+# >=1.10 是硬性要求：MCP 协议端点依赖 FastMCP.streamable_http_app()、
+# session_manager 与 transport_security（旧版本没有这些 API）
+mcp>=1.10.0
 httpx>=0.27.0
 
 # Vector DB (long-term memory)

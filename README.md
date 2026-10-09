@@ -50,9 +50,12 @@ python main.py web
            ├── 鉴权中间件 (Bearer Token, dev 环境自动关闭)
            ├── 限流中间件 (令牌桶, 60 req/min)
            ├── 熔断保护 (CircuitBreaker, 三态模型)
-           ├── /api/v1/*     面试 REST API (CRUD + talk)
-           ├── /mcp/*         MCP 工具调用
+           ├── /api/v1/*     面试 REST API (CRUD + judge + SSE 出题)
+           ├── /mcp/         MCP 协议端点 (Streamable HTTP)
+           ├── /mcp/{tool}   运行时直调 (非协议)
            └── /health       健康检查 + 熔断器状态
+                  │
+           MCP 聚合层 (mcp_aggregator: 3 Server → 单一 MCP 端点)
                   │
            MCP Server 注册中心
            ├── JD Server (parse_jd)
@@ -82,9 +85,9 @@ python main.py web
 | 编排 | LangGraph | StateGraph + 条件边 + MemorySaver Checkpoint |
 | Embedding | BAAI/bge-m3 | 1024 维，SiliconFlow API（`https://api.siliconflow.cn/v1`，免费） |
 | 向量库 | ChromaDB | 本地持久化，2 个 Collection，优雅降级 |
-| 后端 | FastAPI | Gateway + REST API + MCP SSE |
+| 后端 | FastAPI | Gateway + REST API + MCP Streamable HTTP |
 | 前端 | Gradio 5 | 独立端口，原生 async，流式打字机效果 |
-| MCP | FastMCP SDK | 3 个独立 Server，按工具名路由 |
+| MCP | FastMCP SDK | 3 个独立 Server，聚合为单一 MCP 端点 |
 | 文件解析 | pdfplumber + python-docx | PDF/DOCX/TXT 全格式，中文友好错误提示 |
 | 存储 | JSON (→ SQLite) | 会话持久化，每场面试一个文件 |
 
@@ -136,13 +139,53 @@ python main.py clean_memory -y            # 同上，跳过确认
 |------|------|------|
 | `GET` | `/health` | 健康检查 + 熔断器状态 |
 | `POST` | `/api/v1/interview` | 创建面试会话（上传 JD + 简历路径） |
-| `POST` | `/api/v1/interview/{id}/talk` | 提交回答，返回评判 + 下一题 |
+| `GET` | `/api/v1/interview/{id}/stream-question` | SSE 流式出题 |
+| `POST` | `/api/v1/interview/{id}/judge` | 提交回答，返回评判 + 进度 |
+| `POST` | `/api/v1/interview/{id}/talk` | 提交回答 + 出题（已弃用，请用 judge + stream-question） |
 | `GET` | `/api/v1/interview/{id}` | 获取会话状态 |
 | `GET` | `/api/v1/interview/{id}/report` | 获取面试报告 |
-| `POST` | `/mcp/{tool_name}` | MCP 工具通用调用 |
-| `GET` | `/mcp/sse` | MCP SSE transport |
+| `POST` | `/mcp/` | **MCP 协议端点**（Streamable HTTP，见下节） |
+| `POST` | `/mcp/{tool_name}` | 运行时直调（私有约定，非 MCP 协议） |
 
 > 鉴权：`Authorization: Bearer <GATEWAY_API_KEY>`（dev 环境自动放行）
+
+---
+
+## MCP 接入
+
+Gateway 是一个**标准 MCP Server**，通过 FastMCP 原生 Streamable HTTP transport 暴露
+全部 6 个工具，任何兼容 MCP 的客户端（Claude Desktop、Cursor、自研客户端）都能直接连接。
+
+**端点**：`http://127.0.0.1:8000/mcp/`
+
+已实测：官方 MCP Python 客户端 SDK 连接后协议版本协商到 `2025-11-25`，
+`tools/list` 返回 6 个工具并带完整 `inputSchema`，`tools/call` 可正常执行。
+
+| 工具 | 来源 Server | 必填参数 |
+|------|------------|---------|
+| `parse_jd` | jd-server | `text` |
+| `parse_resume` | resume-server | `text` |
+| `generate_questions` | question-bank-server | `jd_json`, `skill` |
+| `search_seed_bank` | question-bank-server | — |
+| `add_to_seed_bank` | question-bank-server | `question_json` |
+| `get_seed_bank_stats` | question-bank-server | — |
+
+**客户端配置示例**（以 Cursor / Claude Desktop 的 `mcpServers` 为例）：
+
+```json
+{
+  "mcpServers": {
+    "interview-hub": {
+      "url": "http://127.0.0.1:8000/mcp/"
+    }
+  }
+}
+```
+
+先用 `python main.py gateway` 或 `python main.py web` 启动服务，再让客户端连接。
+
+> 实现细节见 `mcp_servers/mcp_aggregator.py`：三个独立 FastMCP Server 的工具被聚合
+> 到单个实例，便于客户端一次握手即可看到全部工具。
 
 ---
 
@@ -180,7 +223,11 @@ LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 │   ├── supervisor.py    #   StateGraph + 条件路由 + 节点函数
 │   └── matcher.py       #   JD ↔ 简历技能交叉匹配
 ├── mcp_servers/         # MCP Server + Gateway
-│   └── gateway.py       #   FastAPI（鉴权 / 限流 / 熔断 / 路由）
+│   ├── gateway.py       #   FastAPI（鉴权 / 限流 / 熔断 / MCP 协议端点）
+│   ├── mcp_aggregator.py#   把 3 个 FastMCP Server 聚合为单一端点
+│   ├── jd_server.py     #   JD 解析 Server
+│   ├── resume_server.py #   简历解析 Server
+│   └── question_bank_server.py  # 题库 Server
 ├── memory/              # 记忆系统
 │   ├── session_store.py #   会话持久化（JSON）
 │   └── vector_store.py  #   ChromaDB 向量库（2 Collections, 降级）
