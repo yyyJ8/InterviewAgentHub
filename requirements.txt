@@ -1,4 +1,4 @@
-# LLM (DeepSeek V4 Pro via OpenAI-compatible API)
+# LLM (deepseek-flash via OpenAI-compatible API)
 openai>=1.30.0
 
 # Orchestration

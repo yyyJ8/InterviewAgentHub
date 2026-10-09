@@ -26,14 +26,24 @@ from config import config
 
 logger = logging.getLogger("web.ui")
 
-GATEWAY_BASE = f"http://127.0.0.1:{config.gateway_port}"
+# 网关地址：0.0.0.0 是绑定地址不能用于连接，统一回环到 127.0.0.1
+_gateway_host = "127.0.0.1" if config.gateway_host in ("0.0.0.0", "") else config.gateway_host
+GATEWAY_BASE = f"http://{_gateway_host}:{config.gateway_port}"
 
-UPLOADS_DIR = Path("uploads")
-UPLOADS_DIR.mkdir(exist_ok=True)
+# 鉴权头：prod 环境 Gateway 会校验 Bearer Token，UI 必须带上，否则全部 401
+AUTH_HEADERS = {"Authorization": f"Bearer {config.gateway_api_key}"}
+
+UPLOADS_DIR = config.uploads_dir
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _gateway_url(path: str) -> str:
     return f"{GATEWAY_BASE}{path}"
+
+
+def _client(timeout: float = 300.0) -> httpx.AsyncClient:
+    """构造带鉴权头的 Gateway 客户端。"""
+    return httpx.AsyncClient(timeout=timeout, headers=AUTH_HEADERS)
 
 
 def _extract_file_path(file_obj) -> str:
@@ -187,7 +197,7 @@ def _render_report_md(state: dict) -> str:
 
 # ── Gradio 回调 ────────────────────────────────────────────
 
-async def on_start(jd_file, resume_file):
+async def on_start(jd_file, resume_file, candidate_name=""):
     """如  Generator: 逐步 yield 进度，UI 实时更新。"""
     if jd_file is None or resume_file is None:
         yield (
@@ -223,13 +233,13 @@ async def on_start(jd_file, resume_file):
             gr.update(visible=True), gr.update(visible=False),
             gr.update(visible=False),
         )
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with _client(300.0) as client:
             resp = await client.post(
                 _gateway_url("/api/v1/interview"),
                 json={
                     "jd_path": str(persistent_jd),
                     "resume_path": str(persistent_resume),
-                    "candidate_name": "匿名",
+                    "candidate_name": (candidate_name or "").strip() or "匿名",
                 },
             )
             resp.raise_for_status()
@@ -267,7 +277,7 @@ async def on_start(jd_file, resume_file):
         # ── Step 3: 流式出第一题 ──
         question_text = ""
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with _client(300.0) as client:
             async with client.stream(
                 "GET", _gateway_url(f"/api/v1/interview/{interview_id}/stream-question"),
             ) as response:
@@ -339,9 +349,17 @@ async def on_submit(answer, state):
         )
         return
 
+    # 空回答会被 Gateway 以 400 拒绝，这里先拦下并给出提示，避免抛异常到界面
+    if not (answer or "").strip():
+        yield (
+            state, _build_chat_history(state) + [("系统", "请先输入回答内容再提交")], "",
+            gr.update(visible=False), gr.update(visible=True),
+        )
+        return
+
     try:
         # ── 提交评判 ──
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with _client(300.0) as client:
             judge_resp = await client.post(
                 _gateway_url(f"/api/v1/interview/{interview_id}/judge"),
                 json={"answer": answer or ""},
@@ -360,7 +378,7 @@ async def on_submit(answer, state):
 
         # ── 终止 → 获取报告 ──
         if state["terminated"]:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with _client(60.0) as client:
                 report_resp = await client.get(
                     _gateway_url(f"/api/v1/interview/{interview_id}/report"),
                 )
@@ -384,7 +402,7 @@ async def on_submit(answer, state):
 
         # ── 继续 → 流式出下一题 ──
         question_text = ""
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with _client(300.0) as client:
             async with client.stream(
                 "GET", _gateway_url(f"/api/v1/interview/{interview_id}/stream-question"),
             ) as response:
@@ -454,7 +472,7 @@ async def _end_interview(state):
         )
 
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with _client(300.0) as client:
             report_resp = await client.get(
                 _gateway_url(f"/api/v1/interview/{interview_id}/report"),
             )
@@ -513,6 +531,11 @@ def build_ui() -> gr.Blocks:
                     file_types=[".pdf", ".docx", ".txt"],
                 )
             start_btn = gr.Button("🚀 开始面试", variant="primary", size="lg")
+            candidate_input = gr.Textbox(
+                label="候选人姓名（可选）",
+                placeholder="留空则记为「匿名」",
+                lines=1,
+            )
             init_info = gr.Markdown("")
 
         # ── 第二步：面试区 ──
@@ -522,7 +545,7 @@ def build_ui() -> gr.Blocks:
             with gr.Row():
                 answer_input = gr.Textbox(
                     label="你的回答",
-                    placeholder="请在此输入你的回答...（输入「跳过」可跳过此题）",
+                    placeholder="请在此输入你的回答...（留空会被拒绝，需至少输入一个字符）",
                     scale=4,
                     lines=3,
                 )
@@ -539,7 +562,7 @@ def build_ui() -> gr.Blocks:
 
         start_btn.click(
             fn=on_start,
-            inputs=[jd_file, resume_file],
+            inputs=[jd_file, resume_file, candidate_input],
             outputs=[
                 interview_state, info_md, chatbot, answer_input,
                 upload_col, interview_col, report_col,

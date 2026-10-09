@@ -20,10 +20,12 @@ pip install -r requirements.txt
 
 # 2. 配置环境变量（复制模板并填入 API Key）
 cp .env.example .env
-# 编辑 .env → 填入 DEEPSEEK_API_KEY
+# 编辑 .env → 填入 DEEPSEEK_API_KEY（LLM）和 SILICONFLOW_API_KEY（Embedding）
 
-# 3. （可选）下载本地 Embedding 模型（中文效果更好，跳过则使用 HuggingFace 在线模型）
+# 3. Embedding 默认走 SiliconFlow API 的 BAAI/bge-m3（1024 维，免费，无需下载任何模型）
+#    本地模型只是 API 不可用时的降级兜底，可选安装：
 # HF_ENDPOINT=https://hf-mirror.com hf download BAAI/bge-base-zh-v1.5 --local-dir D:/model/bge-base-zh-v1.5
+# 提示：SiliconFlow 免费模型需账户完成实名认证且余额非负，否则返回 402 (code 30001)
 
 # 4. 启动
 python main.py web
@@ -62,12 +64,12 @@ python main.py web
       Agent 层                                                匹配层
       ├── JD 解析 Agent                                       matcher.py
       ├── 简历分析 Agent                                      规则 + 语义
-      ├── 面试官 Agent (多轮追问)                              (BGE embedding)
+      ├── 面试官 Agent (多轮追问)                              (bge-m3 embedding)
       └── 反馈 Agent (5 维度报告)
                   │
            记忆层
            ├── SessionStore (JSON → 即将迁移 SQLite)
-           └── VectorStore (ChromaDB, 4 Collections, 优雅降级)
+           └── VectorStore (ChromaDB, 2 Collections, 优雅降级)
 ```
 
 ---
@@ -76,10 +78,10 @@ python main.py web
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
-| LLM | DeepSeek V4 Pro | OpenAI 兼容 API，指数退避重试 + 流式输出 |
+| LLM | deepseek-flash（DeepSeek-V4.1-Flash） | OpenAI 兼容 API，指数退避重试 + 流式输出 |
 | 编排 | LangGraph | StateGraph + 条件边 + MemorySaver Checkpoint |
-| Embedding | BGE-base-zh-v1.5 | 768 维，中文 SOTA，本地部署零费用 |
-| 向量库 | ChromaDB | 本地持久化，4 个 Collection，优雅降级 |
+| Embedding | BAAI/bge-m3 | 1024 维，SiliconFlow API（`https://api.siliconflow.cn/v1`，免费） |
+| 向量库 | ChromaDB | 本地持久化，2 个 Collection，优雅降级 |
 | 后端 | FastAPI | Gateway + REST API + MCP SSE |
 | 前端 | Gradio 5 | 独立端口，原生 async，流式打字机效果 |
 | MCP | FastMCP SDK | 3 个独立 Server，按工具名路由 |
@@ -122,6 +124,8 @@ python main.py web                        # 启动全部服务（Gradio + Gatewa
 python main.py gateway                    # 仅启动 API Gateway
 python main.py history                    # 查看所有历史面试
 python main.py history -c 张三            # 按候选人姓名搜索
+python main.py clean_memory               # 清理会话与向量记忆（交互确认）
+python main.py clean_memory -y            # 同上，跳过确认
 ```
 
 ---
@@ -148,13 +152,22 @@ python main.py history -c 张三            # 按候选人姓名搜索
 
 ```bash
 ENV=dev                                    # dev | prod
-DEEPSEEK_API_KEY=sk-your-key-here          # DeepSeek API Key
+DEEPSEEK_API_KEY=sk-your-key-here          # DeepSeek API Key（LLM）
 DEEPSEEK_BASE_URL=https://api.deepseek.com # API 地址
-LLM_MODEL=deepseek-v4-pro                  # 模型名
-EMBEDDING_MODEL=D:/model/bge-base-zh-v1.5  # 本地路径或 HF 模型名
+LLM_MODEL=deepseek-flash                   # 模型 API 标识（DeepSeek-V4.1-Flash）
+EMBEDDING_PROVIDER=api                     # api（默认，走 SiliconFlow）| local（强制本地）
+EMBEDDING_MODEL=BAAI/bge-m3                # 必须写全 id，写成 bge-m3 会返回 400
+SILICONFLOW_API_KEY=sk-your-key-here       # SiliconFlow API Key（Embedding）
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1  # Embedding 接口地址
+LOCAL_EMBEDDING_MODEL=D:/model/bge-base-zh-v1.5     # API 不可用时的本地兜底模型
 GATEWAY_API_KEY=dev-key-change-me          # Gateway 鉴权 Token
 LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 ```
+
+> `BAAI/bge-m3` 在 SiliconFlow 上免费（0 元/K tokens），输出 1024 维，单条文本上限 8192 tokens；
+> 免费模型仍需账户完成实名认证且余额非负，否则返回 `402 (code 30001)`。
+> 本地 `bge-base-zh-v1.5`（768 维）仅作 API 不可用时的降级兜底；它与 API 向量维度不同，
+> 换模型后旧向量不可用，代码会自动检测维度冲突并重建 Collection。
 
 ---
 
@@ -170,7 +183,7 @@ LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 │   └── gateway.py       #   FastAPI（鉴权 / 限流 / 熔断 / 路由）
 ├── memory/              # 记忆系统
 │   ├── session_store.py #   会话持久化（JSON）
-│   └── vector_store.py  #   ChromaDB 向量库（4 Collections, 降级）
+│   └── vector_store.py  #   ChromaDB 向量库（2 Collections, 降级）
 ├── web/
 │   └── app.py           # Gradio Web UI（三步流程，流式出题）
 ├── models/              # Pydantic 数据模型
@@ -193,7 +206,7 @@ LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 | Phase 2 | 多轮面试 + 追问策略 + 反馈报告 | ✅ |
 | Phase 3 | MCP Gateway + ChromaDB 长期记忆 | ✅ |
 | Phase 4 | Gradio Web UI + 工程化 + Demo 数据 | ✅ |
-| Phase 5 | 原生 async + 统一状态机 + 流式出题 + 环境区分 + BGE Embedding | ✅ |
+| Phase 5 | 原生 async + 统一状态机 + 流式出题 + 环境区分 + bge-m3 Embedding（SiliconFlow API） | ✅ |
 
 > 下一步详见 [docs/optimization-roadmap.md](docs/optimization-roadmap.md)
 
@@ -204,8 +217,9 @@ LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 ```bash
 # Demo 数据位于 data/demo/
 ├── Agent开发实习生_JD.txt   # 岗位 JD（Agent 开发实习）
-├── 张明远_简历.txt          # 候选人 A（履历型）
-├── 王一龙_简历.docx         # 候选人 B（实战型）
+├── Java开发实习生_JD.txt    # 岗位 JD（Java 开发实习）
+├── 张明远_简历.txt          # 候选人 A（履历型，TXT）
+├── 江豪-后端.pdf            # 候选人 B（实战型，PDF）
 └── DEMO_剧本.md             # 演示流程 + 预设回答
 ```
 

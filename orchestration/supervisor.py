@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Optional, TypedDict
 from operator import add
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 from models.jd import JD
 from models.resume import Resume
@@ -13,7 +13,7 @@ from models.question import Question, JudgeResult, RoundRecord
 from agents.jd_parser import JDParserAgent
 from agents.resume_analyzer import ResumeAnalyzerAgent
 from agents.interviewer import InterviewerAgent
-from orchestration.matcher import rank_skills, generate_gap_map
+from orchestration.matcher import generate_gap_map
 from tools import parse_file
 from config import config
 
@@ -22,6 +22,10 @@ from config import config
 
 class InterviewState(TypedDict):
     """面试状态 — LangGraph 多轮版"""
+    # 会话标识（必须持久化，否则长期记忆钩子读不到候选人）
+    interview_id: str
+    candidate_name: str
+
     # 输入
     jd_path: str
     resume_path: str
@@ -66,6 +70,8 @@ def initial_state(
 ) -> InterviewState:
     """创建初始状态"""
     return {
+        "interview_id": "",
+        "candidate_name": "",
         "jd_path": jd_path,
         "resume_path": resume_path,
         "jd_raw": "",
@@ -92,13 +98,11 @@ def initial_state(
 # ── 辅助函数 ──────────────────────────────────────────
 
 def _get_current_skill(state: InterviewState) -> tuple[str, str, str]:
-    """获取当前技能及其缺口的描述"""
+    """获取当前技能及其缺口的描述（索引越界时夹取到有效范围）"""
     ordered = state["ordered_skills"]
-    idx = state["current_skill_index"]
     if not ordered:
         return "", "", ""
-    if idx >= len(ordered):
-        idx = len(ordered) - 1
+    idx = min(max(state.get("current_skill_index", 0), 0), len(ordered) - 1)
     target = ordered[idx]
     return target["skill"], target.get("gap", ""), target.get("reason", "")
 
@@ -230,17 +234,17 @@ async def generate_question_node(state: InterviewState) -> dict:
                     previous_answer=last_round.answer,
                 )
             elif action == "switch":
-                # 答不上 → 换下一技能
-                new_idx = state["current_skill_index"] + 1
-                new_skill = ordered[new_idx]["skill"] if new_idx < len(ordered) else skill_name
+                # 换下一技能：索引已在 decide_next_node 推进，这里只读不写，
+                # 避免一次 switch 跳两个技能（曾被重复自增）。
+                idx = min(state.get("current_skill_index", 0), len(ordered) - 1)
+                item = ordered[idx]
                 question = await agent.generate_switch_question(
                     jd=jd, resume=resume,
-                    target_skill=new_skill,
-                    difficulty=_skill_difficulty(ordered[min(new_idx, len(ordered)-1)]),
+                    target_skill=item["skill"],
+                    difficulty=_skill_difficulty(item),
                 )
                 return {
                     "question": question,
-                    "current_skill_index": new_idx,
                     "error": None,
                 }
             else:
@@ -254,7 +258,7 @@ async def generate_question_node(state: InterviewState) -> dict:
                 )
         else:
             # 首次出题
-            item = ordered[state["current_skill_index"]]
+            item = ordered[min(state["current_skill_index"], len(ordered) - 1)]
             question = await agent.generate_question(
                 jd=jd, resume=resume,
                 target_skill=item["skill"],
@@ -305,7 +309,7 @@ async def judge_answer_node(state: InterviewState) -> dict:
 
 
 async def decide_next_node(state: InterviewState) -> dict:
-    """决定下一步动作"""
+    """决定下一步动作。技能索引的推进**只在这里发生**。"""
     action = _next_action_label(state)
     terminated = action == "end"
 
@@ -313,10 +317,12 @@ async def decide_next_node(state: InterviewState) -> dict:
         "terminated": terminated,
     }
 
-    # 如果切换技能，递增 skill_index
+    # switch → 推进到下一个技能（唯一自增点）。当前技能可能是最后一项，此时
+    # 保持不动，由 _next_action_label 的技能覆盖判定结束面试。
     if action == "switch":
-        new_idx = state["current_skill_index"] + 1
-        result["current_skill_index"] = new_idx
+        ordered = state.get("ordered_skills", [])
+        idx = state.get("current_skill_index", 0)
+        result["current_skill_index"] = min(idx + 1, max(len(ordered) - 1, 0))
 
     return result
 
@@ -332,12 +338,8 @@ def decide_routing(state: InterviewState) -> str:
 
 # ── 构建图 ───────────────────────────────────────────
 
-def build_interview_graph(with_interrupt: bool = False):
-    """构建多轮面试流程图
-
-    Args:
-        with_interrupt: 如果 True，在 judge_answer 前中断（适合交互式）
-    """
+def build_interview_graph():
+    """构建多轮面试流程图（6 节点 + 1 条件边）。"""
     builder = StateGraph(InterviewState)
 
     # 注册节点
@@ -365,16 +367,11 @@ def build_interview_graph(with_interrupt: bool = False):
         {"continue": "generate_question", "end": END},
     )
 
-    # 编译
-    kwargs = {"checkpointer": MemorySaver()}
-    if with_interrupt:
-        kwargs["interrupt_before"] = ["judge_answer"]
-
-    graph = builder.compile(**kwargs)
-    return graph
+    # 编译（带 MemorySaver 检查点）
+    return builder.compile(checkpointer=MemorySaver())
 
 
-interview_graph = build_interview_graph(with_interrupt=False)
+interview_graph = build_interview_graph()
 
 
 # ── 便捷入口 ─────────────────────────────────────────
@@ -396,7 +393,9 @@ async def run_interview(
     """
     state = initial_state(jd_path, resume_path, all_answers=answers or [])
 
-    configurable = {"configurable": {"thread_id": "batch_run"}}
+    # 每次批量运行使用独立 thread_id，避免并发共用检查点互相污染
+    thread_id = f"batch_{uuid.uuid4().hex[:12]}"
+    configurable = {"configurable": {"thread_id": thread_id}}
     async for event in interview_graph.astream(state, configurable):
         if "__end__" in event:
             return event["__end__"]
@@ -492,25 +491,24 @@ async def generate_next_question_stream(state: dict):
                     yield result
 
         elif action == "switch":
-            new_idx = state.get("current_skill_index", 0) + 1
-            new_skill = ordered[new_idx]["skill"] if new_idx < len(ordered) else skill_name
-            new_diff = _skill_difficulty(ordered[min(new_idx, len(ordered) - 1)])
+            # 索引已在 decide_next_node 推进，这里只读不写
+            new_idx = min(state.get("current_skill_index", 0), len(ordered) - 1)
+            item = ordered[new_idx]
             async for delta, done, result in agent.generate_switch_question_stream(
                 jd=jd, resume=resume,
-                target_skill=new_skill,
-                difficulty=new_diff,
+                target_skill=item["skill"],
+                difficulty=_skill_difficulty(item),
             ):
                 if not done:
                     yield delta
                 else:
                     if result:
                         state["question"] = result
-                        state["current_skill_index"] = new_idx
                     yield result
 
         else:
             # 默认：生成当前技能的新题
-            item = ordered[state.get("current_skill_index", 0)]
+            item = ordered[min(state.get("current_skill_index", 0), len(ordered) - 1)]
             async for delta, done, result in agent.generate_question_stream(
                 jd=jd, resume=resume,
                 target_skill=item["skill"],
@@ -526,7 +524,7 @@ async def generate_next_question_stream(state: dict):
                     yield result
     else:
         # 首次出题
-        item = ordered[state.get("current_skill_index", 0)]
+        item = ordered[min(state.get("current_skill_index", 0), len(ordered) - 1)]
         async for delta, done, result in agent.generate_question_stream(
             jd=jd, resume=resume,
             target_skill=item["skill"],
@@ -670,13 +668,15 @@ def retrieve_similar_questions(skill: str, n: int = 3) -> list[dict]:
 
 
 def _calc_total_score(rounds: list) -> float:
-    """计算面试总分（平均分）。"""
+    """计算面试总分（平均分）。兼容对象与 dict 两种 round 形态。"""
     scores = []
     for r in rounds:
-        if hasattr(r, "judge") and r.judge:
-            scores.append(r.judge.score)
-        elif isinstance(r, dict) and r.get("judge"):
-            scores.append(r["judge"].score)
+        judge = r.get("judge") if isinstance(r, dict) else getattr(r, "judge", None)
+        if not judge:
+            continue
+        score = judge.get("score") if isinstance(judge, dict) else getattr(judge, "score", None)
+        if score is not None:
+            scores.append(score)
     if not scores:
         return 0.0
     return sum(scores) / len(scores)

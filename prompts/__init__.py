@@ -55,6 +55,18 @@ class PromptTemplate:
         """
         return self._template
 
+    def __len__(self) -> int:
+        """模板文本长度（便于对模板做长度校验）。"""
+        return len(self._template)
+
+    def __contains__(self, item: object) -> bool:
+        """支持 `"{var}" in template` 形式的变量存在性检查。"""
+        return str(item) in self._template
+
+    def __bool__(self) -> bool:
+        """模板非空即为真。"""
+        return bool(self._template)
+
     def __repr__(self) -> str:
         return f"PromptTemplate({self.name!r}, vars={sorted(self._variables)})"
 

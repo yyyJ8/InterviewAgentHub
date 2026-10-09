@@ -15,10 +15,9 @@ import asyncio
 import json
 import logging
 import time
-import uuid
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Callable, Optional
 
-import gradio as gr
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -30,12 +29,59 @@ from models.interview import InterviewState, InterviewStatus
 
 logger = logging.getLogger("gateway")
 
+# 单一版本来源，避免多处取值不一致
+VERSION = "0.4.0"
+
+
+# ── 生命周期（lifespan：替代已弃用的 @app.on_event）──────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """启动时注册三个 MCP Server，关闭时记录日志。"""
+    logger.info("=" * 50)
+    logger.info("MCP Gateway 启动中...")
+
+    # JD Server
+    try:
+        from mcp_servers.jd_server import app as jd_app
+        registry.register(jd_app, "jd-server")
+    except Exception as e:
+        logger.error("JD Server 注册失败: %s", e)
+
+    # Resume Server
+    try:
+        from mcp_servers.resume_server import app as resume_app
+        registry.register(resume_app, "resume-server")
+    except Exception as e:
+        logger.error("Resume Server 注册失败: %s", e)
+
+    # Question Bank Server
+    try:
+        from mcp_servers.question_bank_server import app as qb_app
+        registry.register(qb_app, "question-bank-server")
+    except Exception as e:
+        logger.error("Question Bank Server 注册失败: %s", e)
+
+    # Session Store
+    app.state.session_store = SessionStore()
+    logger.info("Gradio Web UI 由 main.py 独立启动（端口 %s），不走 mount", config.gradio_ui_port)
+
+    logger.info("已注册工具: %s", registry.tool_names)
+    logger.info("Gateway 启动完成，监听 %s:%s", config.gateway_host, config.gateway_port)
+    logger.info("=" * 50)
+
+    yield
+
+    logger.info("MCP Gateway 关闭")
+
+
 # ── FastAPI 实例 ────────────────────────────────────────
 
 app = FastAPI(
     title="AI 面试官 Gateway",
-    version="0.3.0",
+    version=VERSION,
     description="MCP Gateway — 统一管理 JD/简历/题库 Server，提供面试 REST API",
+    lifespan=lifespan,
 )
 
 security = HTTPBearer(auto_error=False)
@@ -141,7 +187,7 @@ class ServerRegistry:
 
     def __init__(self):
         self._servers: dict[str, object] = {}      # name → FastMCP instance
-        self._tool_map: dict[str, callable] = {}   # tool_name → callable
+        self._tool_map: dict[str, Callable] = {}   # tool_name → callable
         self._breakers: dict[str, CircuitBreaker] = {}  # server_name → breaker
 
     def register(self, server, name: str):
@@ -243,46 +289,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 
 # ── 生命周期 ────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup():
-    """启动时注册三个 MCP Server"""
-    logger.info("=" * 50)
-    logger.info("MCP Gateway 启动中...")
-
-    # JD Server
-    try:
-        from mcp_servers.jd_server import app as jd_app
-        registry.register(jd_app, "jd-server")
-    except Exception as e:
-        logger.error("JD Server 注册失败: %s", e)
-
-    # Resume Server
-    try:
-        from mcp_servers.resume_server import app as resume_app
-        registry.register(resume_app, "resume-server")
-    except Exception as e:
-        logger.error("Resume Server 注册失败: %s", e)
-
-    # Question Bank Server
-    try:
-        from mcp_servers.question_bank_server import app as qb_app
-        registry.register(qb_app, "question-bank-server")
-    except Exception as e:
-        logger.error("Question Bank Server 注册失败: %s", e)
-
-    # Session Store
-    app.state.session_store = SessionStore()
-    logger.info("Gradio Web UI 由 main.py 独立启动（端口 %s），不走 mount", config.gradio_ui_port)
-
-    logger.info("已注册工具: %s", registry.tool_names)
-    logger.info("Gateway 启动完成，监听 %s:%s", config.gateway_host, config.gateway_port)
-    logger.info("=" * 50)
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    logger.info("MCP Gateway 关闭")
+# （启动/关闭逻辑已迁移到上方 lifespan，见 FastAPI(lifespan=...)）
 
 
 # ═══════════════════════════════════════════════════════════
@@ -295,7 +302,7 @@ async def shutdown():
 async def health():
     return {
         "status": "ok",
-        "version": "0.4.0",
+        "version": VERSION,
         "tools": registry.tool_names,
         "breakers": registry.breaker_stats(),
     }
@@ -421,9 +428,9 @@ async def judge_answer(interview_id: str, body: dict, _auth=Depends(verify_auth)
     """
     from orchestration.supervisor import judge_and_decide, store_interview_memory
 
-    answer = body.get("answer", "")
-    if answer is None:
-        raise HTTPException(status_code=400, detail="需要 answer 字段")
+    answer = body.get("answer")
+    if answer is None or not str(answer).strip():
+        raise HTTPException(status_code=400, detail="需要非空的 answer 字段")
 
     store: SessionStore = app.state.session_store
     pydantic_state = store.load(interview_id)
@@ -438,11 +445,14 @@ async def judge_answer(interview_id: str, body: dict, _auth=Depends(verify_auth)
 
         # 检查是否终止
         terminated = state.get("terminated", False)
+        pydantic_state = _state_to_pydantic(state)
+        pydantic_state.interview_id = interview_id
         if terminated:
-            pydantic_state = _state_to_pydantic(state)
-            pydantic_state.interview_id = interview_id
             pydantic_state.status = InterviewStatus.COMPLETED
-            store.save(pydantic_state)
+        # 每轮都落盘：技能进度 (current_skill_index) 和空回答计数
+        # (consecutive_empty) 必须跨请求存活，否则每轮都从首个技能重开。
+        store.save(pydantic_state)
+        if terminated:
             store_interview_memory(state)
 
         judge_result = state.get("judge_result")
@@ -472,9 +482,9 @@ async def interview_talk(interview_id: str, body: dict, _auth=Depends(verify_aut
     from orchestration.supervisor import judge_and_decide, generate_next_question, store_interview_memory
 
     logger.warning("DEPRECATED: /talk 已弃用，请改用 /judge + /stream-question")
-    answer = body.get("answer", "")
-    if answer is None:
-        raise HTTPException(status_code=400, detail="需要 answer 字段")
+    answer = body.get("answer")
+    if answer is None or not str(answer).strip():
+        raise HTTPException(status_code=400, detail="需要非空的 answer 字段")
 
     store: SessionStore = app.state.session_store
     pydantic_state = store.load(interview_id)
@@ -630,6 +640,8 @@ def _state_to_pydantic(state: dict) -> InterviewState:
         question=state.get("question"),
         answer=state.get("answer", ""),
         candidate_name=state.get("candidate_name", "匿名"),
+        current_skill_index=state.get("current_skill_index", 0),
+        consecutive_empty=state.get("consecutive_empty", 0),
     )
 
 
@@ -662,22 +674,23 @@ def _pydantic_to_state(ps: InterviewState) -> dict:
         ordered_skills = gap_map.get("ordered_skills", [])
 
     return {
+        "interview_id": ps.interview_id,
+        "candidate_name": ps.candidate_name or "匿名",
         "jd_path": "",
         "resume_path": "",
         "jd_raw": "",
         "resume_raw": "",
-        "interview_id": ps.interview_id,
         "jd": ps.jd,
         "resume": ps.resume,
         "gap_map": gap_map,
         "ordered_skills": ordered_skills,
-        "current_skill_index": 0,
+        "current_skill_index": ps.current_skill_index,
         "rounds": rounds,
         "current_round_number": ps.current_round,
         "question": ps.question or (rounds[-1].question if rounds else None),
         "answer": ps.answer or "",
         "judge_result": rounds[-1].judge if rounds else None,
-        "consecutive_empty": 0,
+        "consecutive_empty": ps.consecutive_empty,
         "terminated": ps.status in (InterviewStatus.COMPLETED, InterviewStatus.TERMINATED),
         "all_answers": [],
         "answer_index": 0,

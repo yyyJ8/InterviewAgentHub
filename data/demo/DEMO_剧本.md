@@ -4,7 +4,7 @@
 
 - JD：`data/demo/Agent开发实习生_JD.txt`
 - 候选人 A：`data/demo/张明远_简历.txt`（履历型）
-- 候选人 B：`data/demo/王一龙_简历.docx`（实战型）
+- 候选人 B：`data/demo/江豪-后端.pdf`（实战型）
 
 ---
 

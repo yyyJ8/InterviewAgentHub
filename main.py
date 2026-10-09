@@ -21,6 +21,20 @@ app = typer.Typer(
 console = Console()
 
 
+def _setup_logging() -> None:
+    """按 config.log_level（来自 LOG_LEVEL）初始化全局日志。"""
+    from config import config
+
+    logging.basicConfig(
+        level=getattr(logging, str(config.log_level).upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+    # 第三方库降噪
+    for noisy in ("httpx", "httpcore", "chromadb", "urllib3", "sentence_transformers"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 def _run_gradio(host: str, port: int):
     """在独立线程中启动 Gradio（避免 mount_gradio_app 通信 bug）"""
     from web.app import demo
@@ -39,10 +53,14 @@ def web():
     """启动 Web UI（Gradio 独立端口 :7860 + FastAPI Gateway :8000）"""
     from config import config
 
+    _setup_logging()
+
+    # 0.0.0.0 是绑定地址，浏览器不能直接访问，展示时回环到 127.0.0.1
+    shown_host = "127.0.0.1" if config.gateway_host in ("0.0.0.0", "") else config.gateway_host
     console.print(f"[green]🚀 启动服务[/green]")
-    console.print(f"[bold]   Gradio UI: http://{config.gateway_host}:{config.gradio_ui_port}[/bold]")
-    console.print(f"[dim]   API:       http://{config.gateway_host}:{config.gateway_port}/api/v1/[/dim]")
-    console.print(f"[dim]   Health:    http://{config.gateway_host}:{config.gateway_port}/health[/dim]")
+    console.print(f"[bold]   Gradio UI: http://{shown_host}:{config.gradio_ui_port}[/bold]")
+    console.print(f"[dim]   API:       http://{shown_host}:{config.gateway_port}/api/v1/[/dim]")
+    console.print(f"[dim]   Health:    http://{shown_host}:{config.gateway_port}/health[/dim]")
 
     t = threading.Thread(
         target=_run_gradio,
@@ -66,9 +84,11 @@ def gateway():
     import uvicorn
     from config import config
 
-    console.print(f"[green]🚀 启动 Gateway → http://{config.gateway_host}:{config.gateway_port}[/green]")
-    console.print(f"[dim]   API:    http://{config.gateway_host}:{config.gateway_port}/api/v1/[/dim]")
-    console.print(f"[dim]   Health: http://{config.gateway_host}:{config.gateway_port}/health[/dim]")
+    _setup_logging()
+    shown_host = "127.0.0.1" if config.gateway_host in ("0.0.0.0", "") else config.gateway_host
+    console.print(f"[green]🚀 启动 Gateway → http://{shown_host}:{config.gateway_port}[/green]")
+    console.print(f"[dim]   API:    http://{shown_host}:{config.gateway_port}/api/v1/[/dim]")
+    console.print(f"[dim]   Health: http://{shown_host}:{config.gateway_port}/health[/dim]")
     uvicorn.run(
         "mcp_servers.gateway:app",
         host=config.gateway_host,

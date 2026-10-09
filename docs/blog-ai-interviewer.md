@@ -62,9 +62,9 @@ LLM 评判 → 决策下一步
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
-| LLM | DeepSeek V4 Pro | OpenAI 兼容 API，定价极低 |
+| LLM | deepseek-flash（DeepSeek-V4.1-Flash） | OpenAI 兼容 API，定价极低 |
 | 编排 | LangGraph | StateGraph + 条件边 + Checkpoint |
-| Embedding | BAAI/bge-base-zh-v1.5 | 768 维，中文 SOTA，本地部署 |
+| Embedding | BAAI/bge-m3 | 1024 维，SiliconFlow API（免费，无需本地部署） |
 | 向量库 | ChromaDB | 本地持久化，2 个 Collection |
 | 后端 | FastAPI | Gateway + REST API + MCP SSE |
 | MCP | FastMCP SDK | 3 个独立 Server |
@@ -321,9 +321,9 @@ class Config:
     # ── LLM ──
     llm_api_key: str               # DEEPSEEK_API_KEY
     llm_base_url: str              # 默认 https://api.deepseek.com
-    llm_model: str                 # 默认 deepseek-v4-pro
+    llm_model: str                 # 默认 deepseek-flash（DeepSeek-V4.1-Flash）
     llm_temperature: float = 0.7
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 32768
     llm_streaming: bool = True
 
     # ── Paths ──
@@ -335,8 +335,12 @@ class Config:
     # ── ChromaDB ──
     chroma_persist_dir: Path = data_dir / "chroma"
 
-    # ── Embedding ──
-    embedding_model: str = "D:/model/bge-base-zh-v1.5"  # 本地 768 维
+    # ── Embedding（SiliconFlow API，OpenAI 兼容）──
+    embedding_model: str = "BAAI/bge-m3"        # 1024 维；必须写全 id，写 bge-m3 会 400
+    siliconflow_api_key: str                    # SILICONFLOW_API_KEY
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_provider: str = "api"             # api（默认）| local（强制本地，不发网络请求）
+    local_embedding_model: str = "D:/model/bge-base-zh-v1.5"  # API 不可用时的兜底
 
     # ── Interview ──
     max_rounds: int = 10
@@ -691,7 +695,7 @@ def generate_gap_map(jd, resume) -> dict:
     }
 ```
 
-当前匹配是**纯字符串小写匹配**。优化路线图中规划了 BGE embedding 语义匹配（React.js ↔ React、Kubernetes ↔ K8s）。
+当前匹配是**纯字符串小写匹配**。优化路线图中规划了 bge-m3 embedding 语义匹配（React.js ↔ React、Kubernetes ↔ K8s）。
 
 ---
 
@@ -948,9 +952,9 @@ class VectorStore:
     def available(self) → bool  # ChromaDB 是否可用
 ```
 
-**优雅降级**：ChromaDB 或 Embedding 加载失败 → `self._available = False` → 所有方法返回空值 → 核心面试流程不受影响。
+**优雅降级**：ChromaDB 不可用，或 Embedding 链路（SiliconFlow API + 本地兜底）全部失败 → `self._available = False` → 所有方法返回空值 → 核心面试流程不受影响。
 
-**Embedding**：`BAAI/bge-base-zh-v1.5`，本地 768 维，`SentenceTransformer` 直接加载本地路径。支持 HF 镜像。
+**Embedding**：`BAAI/bge-m3`，1024 维，走 SiliconFlow 的 OpenAI 兼容 embeddings 接口（`https://api.siliconflow.cn/v1`，该模型免费，单条文本上限 8192 tokens）。API 不可用时回退本地 `SentenceTransformer`（`D:/model/bge-base-zh-v1.5`，768 维），本地也没有则降级为无记忆模式。注意模型 id 必须写全 `BAAI/bge-m3`，写成 `bge-m3` 会返回 400。
 
 ---
 
@@ -996,6 +1000,7 @@ python main.py web                    # Gradio :7860 + Gateway :8000
 python main.py gateway                # 仅 Gateway
 python main.py history                # 查看历史
 python main.py history -c 张三        # 按候选人搜索
+python main.py clean_memory           # 清理会话与向量记忆（-y 跳过确认）
 ```
 
 ### 配置
@@ -1003,12 +1008,19 @@ python main.py history -c 张三        # 按候选人搜索
 ```bash
 # .env 核心项
 ENV=dev                                    # dev | prod
-DEEPSEEK_API_KEY=sk-xxx                    # DeepSeek API Key
-LLM_MODEL=deepseek-v4-pro                  # 模型名
-EMBEDDING_MODEL=D:/model/bge-base-zh-v1.5  # 本地 Embedding
+DEEPSEEK_API_KEY=sk-xxx                    # DeepSeek API Key（LLM）
+DEEPSEEK_BASE_URL=https://api.deepseek.com # LLM API 地址
+LLM_MODEL=deepseek-flash                   # 模型名（DeepSeek-V4.1-Flash）
+EMBEDDING_PROVIDER=api                     # api（默认，走 SiliconFlow）| local（强制本地）
+EMBEDDING_MODEL=BAAI/bge-m3                # Embedding 模型 id（必须写全，1024 维）
+SILICONFLOW_API_KEY=sk-xxx                 # SiliconFlow API Key（Embedding）
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1  # Embedding API 地址
+LOCAL_EMBEDDING_MODEL=D:/model/bge-base-zh-v1.5     # API 不可用时的本地兜底（可选）
 GATEWAY_API_KEY=dev-key-change-me          # Gateway 鉴权
 LOG_LEVEL=INFO                             # 日志级别
 ```
+
+> **故障排查**：SiliconFlow 上的 `BAAI/bge-m3` 虽然免费（0 元/K tokens），但仍要求账户完成实名认证且余额非负，否则 embeddings 接口会返回 `402 (code 30001)`；此类失败会触发本地模型兜底或降级为无记忆模式，不会中断面试流程。
 
 ### Docker Compose
 
@@ -1019,6 +1031,8 @@ services:
     ports: ["8000:8000", "7860:7860"]
     environment:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
+      - EMBEDDING_MODEL=BAAI/bge-m3
     volumes:
       - chroma_data:/app/data/chroma
       - sessions:/app/data/sessions
@@ -1048,8 +1062,8 @@ services:
 
 | 改动 | 说明 |
 |------|------|
-| Embedding 升级 | `all-MiniLM-L6-v2`(384维) → `bge-base-zh-v1.5`(768维, 中文SOTA) |
-| 模型本地化 | 下载到 `D:\model\bge-base-zh-v1.5`，不联网加载 |
+| Embedding 升级 | `all-MiniLM-L6-v2`(384维, 本地) → `bge-base-zh-v1.5`(768维, 本地) → `BAAI/bge-m3`(1024维, SiliconFlow API) |
+| 模型免下载 | Embedding 默认走 SiliconFlow 在线 API（`BAAI/bge-m3`），用户无需下载本地模型即可运行；本地 `bge-base-zh-v1.5` 降级为可选兜底 |
 | 长期记忆闭环 | 2 个 Collection 各有完整读写链路 |
 
 ### 15.3 文档

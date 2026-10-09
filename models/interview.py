@@ -38,5 +38,8 @@ class InterviewState(BaseModel):
     question: Optional[Question] = None   # 待回答的当前题目
     answer: Optional[str] = ""            # 候选人对当前题目的回答
     candidate_name: Optional[str] = None
+    # 多轮面试进度（必须持久化：每次请求都会用它重建编排状态）
+    current_skill_index: int = 0          # ordered_skills 中的当前技能下标
+    consecutive_empty: int = 0            # 连续空回答计数（终止条件）
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)

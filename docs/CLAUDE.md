@@ -15,11 +15,11 @@
 | 技术 | 用途 |
 |---|---|
 | Python 3.12 | 开发语言 |
-| DeepSeek V4 Pro | LLM（定价极低，随意调试） |
+| deepseek-flash（DeepSeek-V4.1-Flash） | LLM（定价极低，随意调试） |
 | LangGraph | AI 面试官项目的编排框架 |
 | MCP SDK | 模型上下文协议实现 |
-| ChromaDB | 长期记忆存储（本地向量库） |
-| BGE-base-zh-v1.5 | Embedding 模型（768 维，中文 SOTA，本地加载） |
+| ChromaDB | 长期记忆存储（本地向量库，2 个 Collection） |
+| BAAI/bge-m3 | Embedding 模型（1024 维，SiliconFlow API，免费） |
 | Gradio 5 | Web UI（原生 async 支持） |
 
 ---
@@ -50,10 +50,10 @@ Supervisor（LangGraph 编排）
 
 1. **DAG 编排**：强依赖串行（解析→匹配→出题），弱依赖并行（多个角度同时研究）
 2. **多轮对话**：面试官根据候选人回答动态出下一题（deepen / clarify / switch），状态管理
-3. **长期记忆**：ChromaDB 向量库存储面试记录，下次面试可参考历史
+3. **长期记忆**：ChromaDB 向量库存储面试记录（`ih_question_bank` / `ih_interview_sessions` 两个 Collection），下次面试可参考历史
 4. **MCP Gateway**：统一管理多个 Server，加鉴权、限流、熔断
 5. **流式输出**：面试题逐字生成，打字机效果
-6. **语义匹配**：BGE embedding 做 JD ↔ 简历技能模糊匹配（规划中）
+6. **语义匹配**：bge-m3 embedding 做 JD ↔ 简历技能模糊匹配（规划中）
 
 ### 面试价值
 
@@ -90,7 +90,7 @@ Phase 5（第 4 周）：优化与体验升级
   - 首题流式输出（打字机效果）
   - Prompt 模板变量校验
   - 环境区分（dev/prod）
-  - Embedding 升级为 BGE-base-zh-v1.5（本地 768 维）
+  - Embedding 升级为 SiliconFlow API 的 BAAI/bge-m3（1024 维，免费；本地 bge-base-zh-v1.5 降级为可选兜底）
 ```
 
 ---
@@ -145,3 +145,4 @@ touch mini_framework/tests/__init__.py
 
 - [optimization-roadmap.md](docs/optimization-roadmap.md) — 完整优化升级方案（Phase 5 产出）
 - requirements.txt 位于项目根目录，记录了项目全部依赖
+- 长期记忆的 Embedding 走 SiliconFlow API（`BAAI/bge-m3`，1024 维，`https://api.siliconflow.cn/v1`），本地模型仅作兜底

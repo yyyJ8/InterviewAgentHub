@@ -1,7 +1,12 @@
 # AI 面试官 — 优化升级方案
 
 > 从 Demo 到半生产级的完整演进路线图  
-> 2026-06-20 | 当前版本 v0.4.0
+> 2026-06-20 起草（当时版本 v0.4.0）| 当前版本 v0.5.0（Phase 5 已落地）
+>
+> **阅读提示**：本文写于 Phase 5 之前。第一章「现状诊断」与第二章各节描述的是**当时的待优化状态**，
+> 其中 2.1–2.4 已在 Phase 5 落地（详见 [blog-ai-interviewer.md](blog-ai-interviewer.md) 的 Phase 5 改动日志）。
+> 第三章及以后的内容属于**未来设想**，文中的示例代码均为方案草图，不代表当前实现；
+> 当前实现请以 `config.py`、`models/llm.py`、`memory/vector_store.py` 为准。
 
 ---
 
@@ -16,6 +21,8 @@
 ---
 
 ## 一、现状诊断
+
+> 本章记录的是 **Phase 5 之前（v0.4.0）** 的诊断结论，表中问题多数已在 Phase 5 修复，保留原文以便对照演进过程。
 
 ### 1.1 架构总览
 
@@ -269,7 +276,7 @@ def __post_init__(self):
 
 ## 三、中期重构（1-2 月，架构升级）
 
-### 3.1 语义技能匹配（利用 BGE Embedding）
+### 3.1 语义技能匹配（利用 bge-m3 Embedding）
 
 **现状**：`matcher.py` 用纯字符串小写匹配技能名：
 
@@ -279,7 +286,7 @@ resume_skill_map = {s.name.lower(): s for s in resume.skills}
 if key in skill_map:  # "React.js" vs "React" → False ❌
 ```
 
-**方案**：基于 BGE embedding 的余弦相似度匹配。
+**方案**（设想）：基于 `BAAI/bge-m3` embedding（SiliconFlow API，1024 维）的余弦相似度匹配，直接复用 `VectorStore` 的 embedding 能力。
 
 ```
 JD 技能列表                简历技能列表
@@ -416,7 +423,10 @@ CREATE INDEX idx_sessions_status ON interview_sessions(status);
 
 ### 3.4 Embedding 服务化（可选）
 
-如果后续多个项目都用 BGE embedding，可以抽成独立服务：
+> 当前实现已经**默认走 SiliconFlow 在线 API**（`BAAI/bge-m3`，1024 维），无需本地部署；
+> 本节设想的是进一步把 embedding 抽成**自建**的独立 HTTP 服务，供多个项目共用。
+
+如果后续多个项目都用 bge-m3 embedding，可以抽成独立服务：
 
 ```
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
@@ -427,16 +437,15 @@ CREATE INDEX idx_sessions_status ON interview_sessions(status);
                          │ HTTP :7997
                 ┌────────┴────────┐
                 │ Infinity Server │
-                │ BGE-base-zh     │
-                │ (~400MB RAM)    │
+                │ bge-m3 (1024 维) │
                 └─────────────────┘
 ```
 
-当前项目在 [vector_store.py](memory/vector_store.py) 中加一个 `InfinityEmbeddingClient` 即可：
+当前项目在 [vector_store.py](memory/vector_store.py) 中加一个 `InfinityEmbeddingClient` 即可（以下为**设想代码**，尚未实现；当前实现是 `_ApiEmbedder` 调 SiliconFlow）：
 
 ```python
 class InfinityEmbeddingClient:
-    """本地 Infinity embedding 服务客户端"""
+    """本地 Infinity embedding 服务客户端（设想）"""
 
     def __init__(self, base_url: str = "http://localhost:7997"):
         self._base = base_url
@@ -444,7 +453,7 @@ class InfinityEmbeddingClient:
     def encode(self, texts: list[str]) -> list[list[float]]:
         resp = requests.post(
             f"{self._base}/embeddings",
-            json={"input": texts, "model": "bge"},
+            json={"input": texts, "model": "bge-m3"},   # 1024 维
         )
         return [e["embedding"] for e in resp.json()["data"]]
 ```
@@ -453,9 +462,12 @@ class InfinityEmbeddingClient:
 
 ### 3.5 LLM Provider 抽象
 
+> **本节的 provider 示例均为设想代码，尚未实现。** 当前实现是 [models/llm.py](models/llm.py) 中一个薄的 `LLM` 封装，
+> 用 `AsyncOpenAI` 直连 `config.llm_base_url`（默认 `https://api.deepseek.com`，模型 `deepseek-flash`），没有 Provider 层。
+
 **现状**：[models/llm.py](models/llm.py) 硬编码 `AsyncOpenAI`。
 
-**方案**：轻量抽象，不和 LangChain 耦合。
+**方案（设想）**：轻量抽象，不和 LangChain 耦合。
 
 ```python
 from abc import ABC, abstractmethod
@@ -470,7 +482,7 @@ class DeepSeekProvider(BaseLLMProvider):
     def __init__(self):
         self._client = AsyncOpenAI(
             api_key=config.llm_api_key,
-            base_url="https://api.deepseek.com",
+            base_url="https://api.deepseek.com",   # 当前实现的默认值
         )
     ...
 
@@ -478,12 +490,12 @@ class OpenAIProvider(BaseLLMProvider):
     def __init__(self):
         self._client = AsyncOpenAI(
             api_key=config.llm_api_key,
-            base_url="https://api.openai.com/v1",
+            base_url="https://api.openai.com/v1",  # 设想：切换到 OpenAI
         )
     ...
 
 class OllamaProvider(BaseLLMProvider):
-    """本地 Ollama 模型"""
+    """本地 Ollama 模型（设想）"""
     def __init__(self, model: str = "qwen2.5:7b"):
         self._client = AsyncOpenAI(
             api_key="ollama",
@@ -530,7 +542,7 @@ class OllamaProvider(BaseLLMProvider):
 ┌─────────────────────────────────────────────────┐
 │                  面试题库系统                      │
 │                                                  │
-│  seed_questions.json (当前 10 道种子题)            │
+│  seed_questions.json (当前 12 道种子题)            │
 │       │                                          │
 │       ▼                                          │
 │  ┌─────────────┐     ┌──────────────┐           │
@@ -592,15 +604,17 @@ class OllamaProvider(BaseLLMProvider):
 
 ### 4.6 技术栈前瞻
 
+> 「现在」列已按当前代码（v0.5.0）校正；「未来」列是设想。
+
 ```
                     现在                         未来
                     ────                        ────
 Web 框架           Gradio 5                    Gradio 5 / Next.js 前端
 API                FastAPI + MCP               FastAPI + GraphQL
 状态机             LangGraph                   LangGraph + 持久化 Checkpoint
-LLM                DeepSeek API                DeepSeek + 本地 Qwen (混合推理)
-Embedding          BGE-base-zh (本地)          BGE-base-zh (Infinity 服务)
-向量库             ChromaDB                    ChromaDB / Milvus Lite
+LLM                DeepSeek API (deepseek-flash)  DeepSeek + 本地 Qwen (混合推理)
+Embedding          BAAI/bge-m3 (SiliconFlow API, 1024维)  bge-m3 (自建 Infinity 服务)
+向量库             ChromaDB (2 Collections)    ChromaDB / Milvus Lite
 存储               JSON → SQLite              SQLite → PostgreSQL
 部署               单机                         Docker Compose → K8s
 监控               print/logger                OpenTelemetry + Grafana
