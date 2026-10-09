@@ -117,14 +117,37 @@ class _LocalEmbedder:
         return self._model.encode(texts).tolist()
 
 
+class _LazyEmbedder:
+    """惰性初始化包装：真正需要时才构造被包装的 Embedder。
+
+    用途：本地兜底模型（SentenceTransformer）构造需数十秒，若在初始化时就建好，
+    即使 API 全程正常也要白付这份启动开销。包装后只在 API 首次失败时才加载。
+    """
+
+    def __init__(self, factory, label: str):
+        self._factory = factory
+        self._inner = None
+        self.label = label
+
+    def _get(self):
+        if self._inner is None:
+            self._inner = self._factory()
+            # 加载完成后 label 反映真实生效的提供者
+            self.label = getattr(self._inner, "label", self.label)
+        return self._inner
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._get().embed(texts)
+
+
 class _FallbackEmbedder:
-    """API 优先，任一环节失败即切换到本地模型并保持。"""
+    """API 优先，遇到瞬时故障时切换到本地模型并保持。"""
 
     def __init__(self, primary, secondary):
         self._primary = primary
         self._secondary = secondary
         self._active = primary
-        self.label = f"{primary.label}(fallback:{secondary.label})"
+        self.label = f"{primary.label}(fallback:{getattr(secondary, 'label', 'local')})"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         try:
@@ -135,10 +158,11 @@ class _FallbackEmbedder:
                 # 本地模型维度不同，静默切换会让向量库维度反复横跳。
                 raise
             logger.warning(
-                "Embedding API 暂时不可用，回退本地模型 [%s]: %s", self._secondary.label, e
+                "Embedding API 暂时不可用，回退本地模型 [%s]: %s",
+                getattr(self._secondary, "label", "local"), e,
             )
             self._active = self._secondary
-            self.label = self._secondary.label
+            self.label = getattr(self._secondary, "label", "local")
             return self._secondary.embed(texts)
 
 
@@ -187,15 +211,20 @@ def get_embedder():
             batch_size=config.embedding_batch_size,
         )
         if config.embedding_use_local_fallback:
-            try:
-                _embedder_cache = _FallbackEmbedder(api, _local())
-            except Exception as e:  # noqa: BLE001 - 本地不可用则纯 API
-                logger.warning("本地兜底模型不可用，仅使用 API: %s", e)
-                _embedder_cache = api
+            # 惰性包装：本地模型（数十秒加载）只在 API 首次瞬时失败时才真正构造
+            _embedder_cache = _FallbackEmbedder(
+                api,
+                _LazyEmbedder(
+                    lambda: _LocalEmbedder(config.local_embedding_model),
+                    label=f"local:{config.local_embedding_model}",
+                ),
+            )
         else:
             _embedder_cache = api
         logger.info(
-            "Embedding 就绪: %s @ %s", config.embedding_model, config.siliconflow_base_url
+            "Embedding 就绪: %s @ %s（本地兜底: %s）",
+            config.embedding_model, config.siliconflow_base_url,
+            "按需加载" if config.embedding_use_local_fallback else "已禁用",
         )
         return _embedder_cache
 

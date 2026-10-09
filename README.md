@@ -127,9 +127,26 @@ python main.py web                        # 启动全部服务（Gradio + Gatewa
 python main.py gateway                    # 仅启动 API Gateway
 python main.py history                    # 查看所有历史面试
 python main.py history -c 张三            # 按候选人姓名搜索
+python main.py seed --dry-run             # 预览：向量库里有哪些题可沉淀进题库
+python main.py seed                       # 把向量库积累的题目沉淀进种子题库
 python main.py clean_memory               # 清理会话与向量记忆（交互确认）
 python main.py clean_memory -y            # 同上，跳过确认
 ```
+
+### 题库从哪来
+
+题库 `data/seed_questions.json` 有**两个来源**，并且会随面试增长：
+
+| 来源 | 说明 |
+|------|------|
+| 初始种子题 | 仓库自带，覆盖 Python / Django / MySQL / Redis / Go 等 |
+| **面试沉淀** | 面试结束时自动把本场出过的题写回题库（去重 + 质量过滤），也可用 `python main.py seed` 把向量库里的历史积累一次性导入 |
+
+质量门槛（不达标不入库）：题干 ≥15 字符、作答要点 ≥2 条且每条 ≥5 字符、必须有 skill；
+去重按「忽略空白与大小写」比对题干。
+
+> 说明：`seed_questions.json` 是题库的唯一真相来源；向量库 `ih_question_bank`
+> 只是「已出题目」的检索索引（用于语义检索避免重复出题），两者职责不同。
 
 ---
 

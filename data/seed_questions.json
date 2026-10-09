@@ -144,5 +144,19 @@
       "实际应用场景",
       "学习收获和反思"
     ]
+  },
+  {
+    "skill": "Java",
+    "difficulty": "basic",
+    "content": "请解释Java中的自动装箱和拆箱机制，并举例说明一个可能由自动装箱引发的NullPointerException场景。",
+    "context": "",
+    "expected_answer_points": []
+  },
+  {
+    "skill": "MyBatis",
+    "difficulty": "intermediate",
+    "content": "你在智能金融风控决策系统中，MyBatis 是如何支持根据不同的风险类型、时间范围等动态条件查询风险事件列表的？请具体说明你使用的动态 SQL 方案，以及如何防范 SQL 注入。",
+    "context": "",
+    "expected_answer_points": []
   }
 ]

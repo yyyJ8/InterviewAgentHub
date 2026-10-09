@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Optional, TypedDict
 from operator import add
 
@@ -21,6 +22,8 @@ from agents.interviewer import InterviewerAgent
 from orchestration.matcher import generate_gap_map
 from tools import parse_file
 from config import config
+
+logger = logging.getLogger("supervisor")
 
 
 # ── State ─────────────────────────────────────────────
@@ -574,6 +577,46 @@ def store_interview_memory(state: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+def promote_interview_questions(state: dict) -> dict:
+    """面试结束时，把本场出过的题沉淀进种子题库（去重 + 质量过滤）。
+
+    与 store_interview_memory 的区别：后者把整场面试记录写入向量库（供候选人
+    历史检索），本函数把**题目本身**沉淀进 data/seed_questions.json —— 让题库
+    随面试增长，而不是永远只有初始种子题。
+
+    失败时静默降级，不影响面试流程。返回统计信息（失败时为空统计）。
+    """
+    empty = {"added": 0, "skipped_duplicate": 0, "skipped_quality": 0,
+             "reasons": [], "total": 0}
+    try:
+        from mcp_servers.question_bank_server import promote_questions
+
+        candidates: list[dict] = []
+        for r in state.get("rounds", []):
+            question = r.get("question") if isinstance(r, dict) else getattr(r, "question", None)
+            if question is None:
+                continue
+            if hasattr(question, "model_dump"):
+                candidates.append(question.model_dump(mode="json"))
+            elif isinstance(question, dict):
+                candidates.append(question)
+
+        if not candidates:
+            return empty
+
+        stats = promote_questions(candidates)
+        if stats.get("added"):
+            logger.info(
+                "题库沉淀：新增 %s 道（跳过重复 %s / 质量不足 %s），当前共 %s 道",
+                stats["added"], stats["skipped_duplicate"],
+                stats["skipped_quality"], stats["total"],
+            )
+        return stats
+    except Exception as e:  # noqa: BLE001 - 沉淀失败不应影响面试
+        logger.warning("题库沉淀失败（已忽略）: %s", e)
+        return empty
 
 
 def get_candidate_history_summary(candidate_name: str) -> str:

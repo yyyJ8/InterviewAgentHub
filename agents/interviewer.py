@@ -417,7 +417,7 @@ class InterviewerAgent(BaseAgent):
         写入失败静默忽略，不影响核心面试流程。
         """
         try:
-            from memory.vector_store import VectorStore
+            from memory.vector_store import COLLECTION_QUESTION_BANK, VectorStore
             from config import config
             import uuid
 
@@ -426,12 +426,21 @@ class InterviewerAgent(BaseAgent):
             vs = VectorStore()
             if not vs.available:
                 return
+            # 元数据同时保留作答要点：沉淀回种子题库时这些是质量判断的依据，
+            # 不存的话沉淀出来的题会缺少 expected_answer_points。
+            # Chroma 元数据只接受标量，list 需序列化为 JSON 字符串。
+            import json as _json
+
             vs.add(
-                "ih_question_bank",
+                COLLECTION_QUESTION_BANK,
                 documents=[question.content],
                 metadatas=[{
                     "skill": question.skill,
                     "difficulty": question.difficulty.value,
+                    "expected_answer_points": _json.dumps(
+                        question.expected_answer_points, ensure_ascii=False
+                    ),
+                    "context": question.context or "",
                 }],
                 ids=[uuid.uuid4().hex[:8]],
             )

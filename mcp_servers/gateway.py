@@ -418,7 +418,11 @@ async def judge_answer(interview_id: str, request: Request, body: dict, _auth=De
     Request:  {"answer": "..."}
     Response: {"judge": {...}, "terminated": bool, "rounds": [...], "progress": {...}}
     """
-    from orchestration.supervisor import judge_and_decide, store_interview_memory
+    from orchestration.supervisor import (
+        judge_and_decide,
+        promote_interview_questions,
+        store_interview_memory,
+    )
 
     answer = body.get("answer")
     if answer is None or not str(answer).strip():
@@ -446,6 +450,8 @@ async def judge_answer(interview_id: str, request: Request, body: dict, _auth=De
         store.save(pydantic_state)
         if terminated:
             store_interview_memory(state)
+            # 本场出过的题沉淀进种子题库（让题库随面试增长）
+            promote_interview_questions(state)
 
         judge_result = state.get("judge_result")
         ordered = state.get("ordered_skills", [])
@@ -471,7 +477,12 @@ async def judge_answer(interview_id: str, request: Request, body: dict, _auth=De
 @router.post("/api/v1/interview/{interview_id}/talk")
 async def interview_talk(interview_id: str, request: Request, body: dict, _auth=Depends(verify_auth)):
     """[已弃用] 提交回答 + 出题。请改用 /judge + /stream-question。"""
-    from orchestration.supervisor import judge_and_decide, generate_next_question, store_interview_memory
+    from orchestration.supervisor import (
+        generate_next_question,
+        judge_and_decide,
+        promote_interview_questions,
+        store_interview_memory,
+    )
 
     logger.warning("DEPRECATED: /talk 已弃用，请改用 /judge + /stream-question")
     answer = body.get("answer")
@@ -494,6 +505,7 @@ async def interview_talk(interview_id: str, request: Request, body: dict, _auth=
             pydantic_state.status = InterviewStatus.COMPLETED
             store.save(pydantic_state)
             store_interview_memory(state)
+            promote_interview_questions(state)
             return {
                 "judge": state.get("judge_result").model_dump() if state.get("judge_result") else None,
                 "next_question": None,

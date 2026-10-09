@@ -295,6 +295,97 @@ def history(
 
 
 @app.command()
+def seed(
+    from_chroma: bool = typer.Option(
+        True, "--from-chroma/--no-from-chroma",
+        help="从向量库（ih_question_bank）读取已出题目作为候选",
+    ),
+    limit: int = typer.Option(50, "--limit", help="单次最多新增多少道"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览，不写入"),
+):
+    """把向量库里积累的题目沉淀进种子题库（seed_questions.json）。
+
+    向量库记录的是面试过程中自动写入的已出题目，但字段只有题干与
+    skill/difficulty；种子题库还需要 expected_answer_points 等字段，
+    缺失的部分会留空。此命令用于把历史积累一次性导入题库。
+    """
+    import json as _json
+
+    from mcp_servers.question_bank_server import (
+        _SEED_PATH,
+        _load_seed,
+        is_promotable,
+        promote_questions,
+    )
+
+    before = len(_load_seed(reload=True))
+    console.print(f"[bold]当前题库[/bold]: {before} 道  ([dim]{_SEED_PATH}[/dim])")
+
+    if not from_chroma:
+        console.print("[yellow]未指定来源（目前仅支持 --from-chroma）[/yellow]")
+        return
+
+    from memory.vector_store import COLLECTION_QUESTION_BANK, VectorStore
+
+    vs = VectorStore()
+    if not vs.available:
+        console.print("[red]向量库不可用，无法读取已出题目[/red]")
+        return
+
+    records = vs.list_all(COLLECTION_QUESTION_BANK)
+    console.print(f"向量库 {COLLECTION_QUESTION_BANK} 中读到 {len(records)} 条记录")
+    if not records:
+        console.print("[yellow]向量库暂无记录（跑几场面试后会积累）[/yellow]")
+        return
+
+    candidates = []
+    for r in records:
+        meta = r.get("metadata") or {}
+        # 作答要点在向量库中以 JSON 字符串保存（Chroma 元数据只接受标量）
+        raw_points = meta.get("expected_answer_points")
+        points = None
+        if raw_points:
+            try:
+                parsed = _json.loads(raw_points)
+                if isinstance(parsed, list):
+                    points = [str(p) for p in parsed]
+            except (ValueError, TypeError):
+                points = None
+
+        candidates.append({
+            "skill": meta.get("skill", ""),
+            "difficulty": meta.get("difficulty", "intermediate"),
+            "content": r.get("document", ""),
+            "context": meta.get("context", ""),
+            # None 表示"来源未提供"，跳过硬性门槛；空列表则会被判为质量不足
+            "expected_answer_points": points if points else None,
+        })
+
+    if dry_run:
+        ok_n = sum(1 for c in candidates if is_promotable(c)[0])
+        console.print(f"\n[bold]预览（未写入）[/bold]")
+        console.print(f"  合格 {ok_n} 道 / 不合格 {len(candidates) - ok_n} 道")
+        for c in candidates[:10]:
+            ok, reason = is_promotable(c)
+            mark = "[green]✓[/green]" if ok else "[yellow]✗[/yellow]"
+            note = "" if ok else f"  [yellow]({reason})[/yellow]"
+            console.print(f"  {mark} [{c['skill']}] {c['content'][:44]}…{note}")
+        return
+
+    stats = promote_questions(candidates, limit=limit)
+    console.print(
+        f"\n[green]沉淀完成[/green]: 新增 {stats['added']} 道"
+        f"（跳过重复 {stats['skipped_duplicate']} / 质量不足 {stats['skipped_quality']}）"
+    )
+    console.print(f"题库: {before} → [bold]{stats['total']}[/bold] 道")
+
+    if stats["reasons"]:
+        console.print("\n[dim]未通过质量门槛的示例:[/dim]")
+        for reason in stats["reasons"][:5]:
+            console.print(f"  [dim]- {reason}[/dim]")
+
+
+@app.command()
 def clean_memory(
     sessions: bool = typer.Option(True, "--sessions", help="清空 SessionStore (JSON 文件)"),
     chroma: bool = typer.Option(True, "--chroma", help="清空 ChromaDB 向量数据"),
