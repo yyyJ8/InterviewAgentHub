@@ -387,11 +387,18 @@ def seed(
 
 @app.command()
 def clean_memory(
-    sessions: bool = typer.Option(True, "--sessions", help="清空 SessionStore (JSON 文件)"),
-    chroma: bool = typer.Option(True, "--chroma", help="清空 ChromaDB 向量数据"),
+    sessions: bool = typer.Option(
+        True, "--sessions/--no-sessions", help="清空 SessionStore (JSON 文件)"
+    ),
+    chroma: bool = typer.Option(
+        True, "--chroma/--no-chroma", help="清空 ChromaDB 向量数据"
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认"),
 ):
-    """清空长期记忆数据（SessionStore + ChromaDB）。"""
+    """清空长期记忆数据（SessionStore + ChromaDB）。
+
+    注意：题库 data/seed_questions.json 属于资料而非记忆，不会被清理。
+    """
     if not yes:
         targets = []
         if sessions:
@@ -422,14 +429,18 @@ def clean_memory(
 
     # 清空 ChromaDB
     if chroma:
-        from memory.vector_store import VectorStore
+        from memory.vector_store import (
+            COLLECTION_INTERVIEW_SESSIONS,
+            COLLECTION_QUESTION_BANK,
+            VectorStore,
+        )
         vs = VectorStore()
         if vs.available:
-            for col_name in ["ih_question_bank", "ih_interview_sessions"]:
-                records = vs.list_all(col_name)
-                for r in records:
+            # 用常量而非字面量：集合名由 CHROMA_COLLECTION_PREFIX 派生
+            for col_name in (COLLECTION_QUESTION_BANK, COLLECTION_INTERVIEW_SESSIONS):
+                for r in vs.list_all(col_name):
                     vs.delete(col_name, r["id"])
-            console.print(f"[green]✓[/green] ChromaDB 已清空")
+            console.print("[green]✓[/green] ChromaDB 已清空")
         else:
             console.print("[yellow]ChromaDB 不可用，跳过[/yellow]")
 
