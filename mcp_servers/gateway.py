@@ -27,6 +27,7 @@ from starlette.routing import Mount
 from config import config
 from mcp_servers.mcp_aggregator import (
     MCP_MOUNT_PREFIX,
+    allowed_hosts_for,
     build_aggregate_mcp,
     session_lifespan,
 )
@@ -37,6 +38,44 @@ logger = logging.getLogger("gateway")
 
 # 单一版本来源，避免多处取值不一致
 VERSION = "0.5.0"
+
+
+# ═══════════════════════════════════════════════════════════
+# 已知第三方噪音抑制
+# ═══════════════════════════════════════════════════════════
+#
+# 现象：客户端（桌面 Agent 等）在初始化后发送 DELETE 终止 session 时，
+# 可能仍有并发的 POST 在途。MCP 的 terminate() 会关闭 read stream，
+# 在途 POST 写该流即抛 anyio.ClosedResourceError。
+#
+# 库自身的异常处理（mcp/server/streamable_http.py）有两处缺口：
+#   1. 第 656 行 `await writer.send(Exception(err))` 未做保护，
+#      而 writer 此时已关闭 → 抛出第二个 ClosedResourceError
+#   2. 该二次异常无人捕获，冒泡到 ASGI 层，uvicorn 打印整段 traceback
+#
+# 客户端此刻已经断开，服务端无法再送出任何响应，因此这条 traceback
+# 既不影响功能也不可修复。此处定向过滤，只匹配该已知签名，
+# 其他 ASGI 异常照常打印。
+_MCP_NOISE_SIGNATURE = "Error handling POST request"
+
+
+class _SuppressMcpTransportNoise(logging.Filter):
+    """过滤 MCP 传输层向已关闭流回传结果时的已知异常噪音。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - 格式化异常不应影响日志
+            return True
+        return not ("ClosedResourceError" in message and _MCP_NOISE_SIGNATURE in message)
+
+
+def install_mcp_noise_filter() -> None:
+    """把噪音过滤器挂到 uvicorn 的错误日志器上（幂等）。"""
+    target = logging.getLogger("uvicorn.error")
+    if not any(isinstance(f, _SuppressMcpTransportNoise) for f in target.filters):
+        target.addFilter(_SuppressMcpTransportNoise())
+        logger.debug("已安装 MCP 传输层噪音过滤器")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -679,6 +718,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("=" * 50)
     logger.info("MCP Gateway 启动中...")
+    install_mcp_noise_filter()
 
     # 三个源 Server 注册进 registry（供运行时直调与熔断保护使用）
     for server, label in (
@@ -698,7 +738,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # MCP 协议端点随本应用一起存活
     async with session_lifespan(app.state.mcp):
         logger.info("MCP 协议端点已就绪: POST %s/", MCP_MOUNT_PREFIX)
-        logger.info("Gateway 启动完成，监听 %s:%s", config.gateway_host, config.gateway_port)
+        # 如实展示客户端可用的地址：绑定地址 0.0.0.0 不是可访问地址，
+        # 且 MCP 的 Host 白名单只放行回环地址，写错了会误导排查。
+        hosts = allowed_hosts_for([config.gateway_host])
+        reachable = [h for h in hosts if not h.endswith(":*") and h not in ("0.0.0.0", "::")]
+        logger.info(
+            "MCP 端点地址: %s",
+            " / ".join(f"http://{h}:{config.gateway_port}{MCP_MOUNT_PREFIX}/" for h in reachable),
+        )
+        logger.info("MCP Host 白名单: %s", hosts)
+        logger.info("Gateway 启动完成，绑定 %s:%s", config.gateway_host, config.gateway_port)
         logger.info("=" * 50)
         yield
 

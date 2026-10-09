@@ -36,6 +36,10 @@ logger = logging.getLogger("mcp.aggregator")
 # 对外端点：mount 在 /mcp，内部路径设为 "/" 后实际端点为 <prefix>/
 MCP_MOUNT_PREFIX = "/mcp"
 
+# MCP 的 DNS-rebinding 防护会校验 Host 头；默认只放行本机回环地址。
+# 注意：不支持 "*" 通配（官方实现只做精确匹配与 "host:*" 端口通配）。
+DEFAULT_ALLOWED_HOSTS = ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*"]
+
 
 def _load_source_servers() -> list[tuple[str, FastMCP]]:
     """惰性导入三个源 Server（避免模块导入期就加载全部依赖）。"""
@@ -56,7 +60,7 @@ def build_transport_security(extra_hosts: Iterable[str] | None = None) -> Transp
     DNS-rebinding 防护保持开启（这是官方推荐），但必须显式列出允许的 Host，
     否则所有请求都会被 421 拒绝。注意不支持 "*"，只支持精确值或 "host:*"。
     """
-    hosts = ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*"]
+    hosts = list(DEFAULT_ALLOWED_HOSTS)
     for h in extra_hosts or ():
         if h and h not in hosts:
             hosts.append(h)
@@ -64,6 +68,11 @@ def build_transport_security(extra_hosts: Iterable[str] | None = None) -> Transp
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts,
     )
+
+
+def allowed_hosts_for(extra_hosts: Iterable[str] | None = None) -> list[str]:
+    """返回实际生效的 Host 白名单（用于启动日志如实展示可访问地址）。"""
+    return list(build_transport_security(extra_hosts).allowed_hosts)
 
 
 def build_aggregate_mcp(

@@ -33,6 +33,10 @@ def _setup_logging() -> None:
     # 第三方库降噪
     for noisy in ("httpx", "httpcore", "chromadb", "urllib3", "sentence_transformers"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # 抑制 MCP 传输层向已关闭流回传结果时的已知异常噪音（详见 gateway 注释）
+    from mcp_servers.gateway import install_mcp_noise_filter
+
+    install_mcp_noise_filter()
 
 
 def _run_gradio(host: str, port: int):
