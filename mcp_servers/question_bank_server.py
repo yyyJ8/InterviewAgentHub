@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Optional
 
 from mcp.server import FastMCP
 
 from models.jd import JD
-from models.question import Question, Difficulty
+from models.question import Question
 from agents.interviewer import InterviewerAgent
 from models.llm import LLM
 

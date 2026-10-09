@@ -48,8 +48,6 @@ def _state_with_judge(idx: int = 0, action: str = "switch", total: int = 3) -> d
         ),
         "consecutive_empty": 0,
         "terminated": False,
-        "all_answers": [],
-        "answer_index": 0,
         "report": None,
         "error": None,
     }

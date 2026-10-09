@@ -1,6 +1,11 @@
+"""多轮面试编排 — LangGraph StateGraph
+
+节点：parse_jd → parse_resume → match_skills → generate_question
+      → judge_answer → decide_next（唯一条件边）
+"""
+
 from __future__ import annotations
 
-import uuid
 from typing import Annotated, Optional, TypedDict
 from operator import add
 
@@ -54,20 +59,12 @@ class InterviewState(TypedDict):
     consecutive_empty: int
     terminated: bool
 
-    # 批量模式：预填所有回答
-    all_answers: list[str]
-    answer_index: int
-
     # 错误
     report: Optional[dict]
     error: Optional[str]
 
 
-def initial_state(
-    jd_path: str,
-    resume_path: str,
-    all_answers: list[str] | None = None,
-) -> InterviewState:
+def initial_state(jd_path: str, resume_path: str) -> InterviewState:
     """创建初始状态"""
     return {
         "interview_id": "",
@@ -88,8 +85,6 @@ def initial_state(
         "judge_result": None,
         "consecutive_empty": 0,
         "terminated": False,
-        "all_answers": all_answers or [],
-        "answer_index": 0,
         "report": None,
         "error": None,
     }
@@ -374,35 +369,6 @@ def build_interview_graph():
 interview_graph = build_interview_graph()
 
 
-# ── 便捷入口 ─────────────────────────────────────────
-
-async def run_interview(
-    jd_path: str,
-    resume_path: str,
-    answers: list[str] | None = None,
-) -> dict:
-    """运行一次完整的批量面试（一次性执行所有轮次）
-
-    Args:
-        jd_path: JD 文件路径
-        resume_path: 简历文件路径
-        answers: 预填的回答列表（每个元素是一轮的回答文本）
-
-    Returns:
-        最终的面试状态（包含 rounds, report 等）
-    """
-    state = initial_state(jd_path, resume_path, all_answers=answers or [])
-
-    # 每次批量运行使用独立 thread_id，避免并发共用检查点互相污染
-    thread_id = f"batch_{uuid.uuid4().hex[:12]}"
-    configurable = {"configurable": {"thread_id": thread_id}}
-    async for event in interview_graph.astream(state, configurable):
-        if "__end__" in event:
-            return event["__end__"]
-
-    return state
-
-
 # ── 交互式帮助函数（供 Web UI 使用） ─────────────────
 
 async def init_interview(jd_path: str, resume_path: str) -> dict:
@@ -610,19 +576,6 @@ def store_interview_memory(state: dict) -> bool:
         return False
 
 
-def retrieve_candidate_history(candidate_name: str) -> list[dict]:
-    """检索候选人的历史面试记录（出题参考）。"""
-    try:
-        from memory.vector_store import VectorStore
-
-        vs = VectorStore()
-        if not vs.available:
-            return []
-        return vs.search_candidate_history(candidate_name)
-    except Exception:
-        return []
-
-
 def get_candidate_history_summary(candidate_name: str) -> str:
     """查询候选人历史面试，返回可注入 Prompt 的摘要。
 
@@ -652,19 +605,6 @@ def get_candidate_history_summary(candidate_name: str) -> str:
         return "\n".join(parts)
     except Exception:
         return ""
-
-
-def retrieve_similar_questions(skill: str, n: int = 3) -> list[dict]:
-    """从历史题库中检索相似题目（出题参考）。"""
-    try:
-        from memory.vector_store import VectorStore
-
-        vs = VectorStore()
-        if not vs.available:
-            return []
-        return vs.search_similar_questions(skill, n=n)
-    except Exception:
-        return []
 
 
 def _calc_total_score(rounds: list) -> float:

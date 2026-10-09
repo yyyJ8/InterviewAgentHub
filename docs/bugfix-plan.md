@@ -1,6 +1,18 @@
 # 面试体验修复方案
 
 > 2026-06-21 | 三个问题：出题顺序、跳过逻辑、记录查看
+>
+> **状态：✅ 三个问题均已修复**（保留原文作为问题分析与修复思路的记录）
+>
+> 逐项对照：
+>
+> | 问题 | 修复要点 |
+> |------|---------|
+> | 1. 出题顺序不合理 | JD 解析 prompt 区分核心技能/工具链；`matcher.rank_skills` 排序键把工具技能垫底 |
+> | 2. 跳过/空回答后重复出同一题 | 根因是**技能索引双增**（`generate_question_node` 与 `decide_next_node` 各 +1）且**进度未持久化**（`current_skill_index` 不在 `InterviewState` 中、Gateway 每轮硬编码为 0）。已改为索引推进只在 `decide_next_node` 发生，并补字段持久化 |
+> | 3. 面试结束后记录在哪查看 | CLI `history` 命令（`--candidate` / `--id` / `--last` / `--chroma`）与 `clean_memory` 已就位 |
+>
+> 相关回归测试见 `tests/test_regression_fixes.py`。
 
 ---
 

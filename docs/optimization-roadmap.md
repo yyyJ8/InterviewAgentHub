@@ -67,210 +67,24 @@
 
 ---
 
-## 二、近期优化（1-2 周，高收益低风险）
+## 二、近期优化（1-2 周，高收益低风险）— ✅ 已全部完成
 
-### 2.1 消除 `_async()` 反模式
+> 本章原列的 4 项已在 **Phase 5** 全部落地并合入 `master`，原方案草图已删除，
+> 避免与当前实现混淆。逐项对照如下：
 
-**当前代码**（[web/app.py:32-64](web/app.py#L32-L64)）：
+| 项 | 原目标 | 落地情况 |
+|----|--------|---------|
+| 2.1 | 消除 `_async()` 反模式 | ✅ 全链路原生 `async/await`，不再用事件循环包装 |
+| 2.2 | 统一面试状态机 | ✅ Gradio 与 Gateway 共用 `orchestration/supervisor.py` 的 StateGraph |
+| 2.3 | Web UI 流式输出 | ✅ `GET /api/v1/interview/{id}/stream-question`（SSE 逐 token 出题） |
+| 2.4 | 其他顺手修复 | ✅ Prompt 模板变量校验、dev/prod 环境区分、Embedding 接入 |
 
-```python
-def _async(coro):
-    """用独立事件循环运行 coroutine"""
-    loop = asyncio.new_event_loop()     # ← 每次调用创建新 loop
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_with_cleanup())
-    finally:
-        loop.close()                     # ← 关闭时可能报噪音错误
-```
+补充：Phase 5 之后还完成了两项本章未列的工作 ——
 
-**问题**：
-- 每次 LLM 调用都创建+销毁一个完整的事件循环，浪费资源
-- `loop.close()` 时如果有未清理的 httpx 连接，会抛 "Event loop is closed" 警告
-- 线程池 fallback 进一步增加了复杂度
-
-**方案**：升级到 Gradio 5 原生 async 支持。
-
-```python
-# 改后：直接用 async def
-async def on_start(jd_file, resume_file):
-    """逐步 yield 进度"""
-    if jd_file is None or resume_file is None:
-        yield (None, None, [("系统", "请先上传 JD 和简历文件")], "", ...)
-        return
-
-    jd_path = _extract_file_path(jd_file)
-    resume_path = _extract_file_path(resume_file)
-
-    yield (None, "📄 正在解析文件...", [("系统", "📄 正在...")], "", ...)
-
-    jd_raw = parse_file(jd_path)
-    resume_raw = parse_file(resume_path)
-    jd_agent = JDParserAgent()
-    jd = await jd_agent.run(jd_raw)          # ← 直接 await
-    ...
-```
-
-**影响范围**：
-- `web/app.py`：`on_start`、`on_submit`、`_end_interview` 改为 `async def`
-- 删除 `_async()` 函数及其线程池 fallback
-- 约 30 行删除，40 行修改
-
-**收益**：稳定性大幅提升，代码量减少，不再有事件循环警告。
-
----
-
-### 2.2 统一面试状态机
-
-**当前问题**：
-
-| 功能 | supervisor.py (LangGraph) | web/app.py (手动状态) |
-|------|:---:|:---:|
-| 解析 JD | `parse_jd_node` | `on_start` 内联 |
-| 解析简历 | `parse_resume_node` | `on_start` 内联 |
-| 技能匹配 | `match_skills_node` | `on_start` 内联 |
-| 出题 | `generate_question_node` | `_generate_next_question` |
-| 评判 | `judge_answer_node` | `_judge_answer` |
-| 终止判断 | `_next_action_label` | 分散在 `_judge_answer` 中 |
-| 状态管理 | LangGraph StateGraph | 手动 dict |
-
-两套代码逻辑几乎一样但互不共享。修一个 bug 要改两处，极易出现行为不一致。
-
-**方案**：Gradio 直接调用 supervisor 函数，Gateway 已经在这么做了。
-
-```python
-# web/app.py 改后
-from orchestration.supervisor import (
-    init_interview,
-    generate_next_question,
-    judge_and_decide,
-    store_interview_memory,
-)
-
-async def on_start(jd_file, resume_file):
-    ...
-    # 直接用 supervisor 的初始化函数
-    state = await init_interview(jd_path, resume_path)
-    state["candidate_name"] = resume.name
-    state = await generate_next_question(state)
-    ...
-
-async def on_submit(answer, state):
-    ...
-    state = await judge_and_decide(state, answer)
-    if state.get("terminated"):
-        store_interview_memory(state)
-        state = await _generate_report(state)
-        ...
-    else:
-        state = await generate_next_question(state)
-    ...
-```
-
-**改动内容**：
-- 删除 `web/app.py` 中的：`_parse_and_match`、`_generate_next_question`、`_judge_answer`
-- 保留 `_generate_report`（supervisor 目前没有）
-- 删除 `_async()` 包装
-- 约 80 行删除，20 行新增
-
-**收益**：逻辑唯一，supervisor 的改进自动惠及 Gradio。
-
----
-
-### 2.3 Web UI 流式输出
-
-**现状**：[agents/interviewer.py:67-112](agents/interviewer.py#L67-L112) 已实现 `generate_question_stream`，但 Gradio 没调用。
-
-```python
-# interviewer.py 已就绪
-async def generate_question_stream(self, jd, resume, target_skill, ...):
-    async for delta, done, result in super().run_streaming(...):
-        if done and result is not None:
-            result.skill = target_skill
-        yield (delta, done, result)
-```
-
-**方案**：在 Gradio 的 `on_start` 和 `on_submit` 中，出题环节改用流式。
-
-```python
-async def on_start(jd_file, resume_file):
-    ...
-    # 流式出题
-    interviewer = InterviewerAgent()
-    question_text = ""
-    async for delta, done, result in interviewer.generate_question_stream(
-        jd=jd, resume=resume, target_skill=skill_name,
-        difficulty=difficulty, intent=intent,
-    ):
-        if not done:
-            question_text += delta
-            # 实时更新聊天区
-            yield (state, info_text,
-                   [("🤖 面试官", question_text + "▌")],  # 光标动画
-                   "", ...)
-        else:
-            state["question"] = result
-            yield (state, info_text,
-                   [("🤖 面试官", question_text)],
-                   "", ...)
-```
-
-**收益**：用户看到题目逐字生成，体验质变（从等 5 秒看结果 → 即时反馈）。
-
----
-
-### 2.4 其他顺手修复
-
-#### 2.4.1 Prompt 变量校验
-
-```python
-# prompts/__init__.py 改后
-import re
-
-_VAR_PATTERN = re.compile(r'\{(\w+)\}')
-
-def load_prompt(name: str) -> PromptTemplate:
-    """加载 prompt 模板，返回带校验的模板对象"""
-    if name in _CACHE:
-        return _CACHE[name]
-    path = _PROMPTS_DIR / f"{name}.md"
-    content = path.read_text(encoding="utf-8")
-    expected = set(_VAR_PATTERN.findall(content))
-    tmpl = PromptTemplate(content, name, expected)
-    _CACHE[name] = tmpl
-    return tmpl
-
-
-class PromptTemplate:
-    __slots__ = ('_template', 'name', 'expected_vars')
-    def __init__(self, template: str, name: str, expected: set[str]):
-        self._template = template
-        self.name = name
-        self.expected_vars = expected
-
-    def format(self, **kwargs) -> str:
-        given = set(kwargs.keys())
-        missing = self.expected_vars - given
-        if missing:
-            raise KeyError(f"Prompt '{self.name}' 缺少变量: {missing}")
-        extra = given - self.expected_vars
-        if extra:
-            logger.warning(f"Prompt '{self.name}' 多余变量: {extra}")
-        return self._template.format(**kwargs)
-```
-
-#### 2.4.2 环境区分
-
-```python
-# config.py 新增
-env: str = field(default_factory=lambda: os.getenv("ENV", "dev"))
-
-def __post_init__(self):
-    if self.env == "dev":
-        self.gateway_require_auth = False
-        self.log_level = "DEBUG"
-    ...
-```
+- **MCP 协议端点**：用 FastMCP 原生 Streamable HTTP transport 暴露 `POST /mcp/`
+  （聚合 3 个 Server 的 6 个工具），见 `mcp_servers/mcp_aggregator.py`
+- **Embedding 迁移**：本地 `bge-base-zh-v1.5`（768 维）→ SiliconFlow API 的
+  `BAAI/bge-m3`（1024 维，免费），本地模型降级为兜底
 
 ---
 

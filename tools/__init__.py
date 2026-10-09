@@ -98,16 +98,3 @@ def parse_file(path: str | Path) -> str:
 
     logger.info("解析成功: %s (%s, %d 字符)", path.name, ext, len(cleaned))
     return cleaned
-
-
-def parse_file_with_info(path: str | Path) -> dict:
-    """解析文件并返回结构化信息"""
-    text = parse_file(path)
-    path_obj = Path(path)
-    return {
-        "filename": path_obj.name,
-        "extension": path_obj.suffix.lower(),
-        "size_bytes": path_obj.stat().st_size,
-        "content": text,
-        "char_count": len(text),
-    }

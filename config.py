@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -59,7 +58,6 @@ class Config:
     logs_dir: Path = ROOT_DIR / "logs"
     uploads_dir: Path = ROOT_DIR / "uploads"
     session_dir: Path = data_dir / "sessions"
-    cache_dir: Path = data_dir / "cache"
 
     # ── ChromaDB ──
     chroma_persist_dir: Path = data_dir / "chroma"
@@ -116,12 +114,6 @@ class Config:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.uploads_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def is_dev(self) -> bool:
-        """是否为开发环境。"""
-        return self.env == "dev"
 
 
 config = Config()  # 单例，全局导入使用

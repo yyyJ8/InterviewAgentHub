@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from config import config
-from models.interview import InterviewState, InterviewStatus
+from models.interview import InterviewState
 
 
 class SessionStore:

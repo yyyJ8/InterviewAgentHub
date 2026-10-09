@@ -684,8 +684,6 @@ def _pydantic_to_state(ps: InterviewState) -> dict:
         "judge_result": rounds[-1].judge if rounds else None,
         "consecutive_empty": ps.consecutive_empty,
         "terminated": ps.status in (InterviewStatus.COMPLETED, InterviewStatus.TERMINATED),
-        "all_answers": [],
-        "answer_index": 0,
         "report": None,
         "error": None,
     }

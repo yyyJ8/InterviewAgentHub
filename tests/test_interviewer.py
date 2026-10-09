@@ -11,7 +11,7 @@ from models.question import (
     Question, JudgeResult, Difficulty,
     RoundRecord, InterviewReport,
 )
-from models.interview import RoundState, InterviewStatus
+from models.interview import RoundState
 
 
 def test_rank_skills_basic():
@@ -45,9 +45,9 @@ def test_rank_skills_basic():
         experience_years=5,
     )
 
-    from agents.interviewer import InterviewerAgent
+    from orchestration.matcher import rank_skills
 
-    ranked = InterviewerAgent.rank_skills(jd, resume)
+    ranked = rank_skills(jd, resume)
 
     assert len(ranked) == 5
 
@@ -82,9 +82,9 @@ def test_rank_skills_no_match():
         projects=[],
     )
 
-    from agents.interviewer import InterviewerAgent
+    from orchestration.matcher import rank_skills
 
-    ranked = InterviewerAgent.rank_skills(jd, resume)
+    ranked = rank_skills(jd, resume)
     assert len(ranked) == 1
     assert ranked[0]["gap"] == "缺口"
     print("  [OK] test_rank_skills_no_match")
@@ -106,9 +106,9 @@ def test_rank_skills_bonus():
         projects=[Project(name="平台", role="后端", description="", tech_stack=["Python"], highlights=[])],
     )
 
-    from agents.interviewer import InterviewerAgent
+    from orchestration.matcher import rank_skills
 
-    ranked = InterviewerAgent.rank_skills(jd, resume)
+    ranked = rank_skills(jd, resume)
     assert len(ranked) == 2
     assert ranked[0]["skill"] == "Python"
     assert ranked[0]["gap"] == "有项目经验"
@@ -267,7 +267,7 @@ def test_supervisor_state():
     assert state["current_round_number"] == 0
     assert state["terminated"] is False
     assert state["consecutive_empty"] == 0
-    assert state["all_answers"] == []
+    assert state["current_skill_index"] == 0
     print("  [OK] test_supervisor_state")
 
 

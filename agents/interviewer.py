@@ -6,9 +6,8 @@ from typing import AsyncIterator, Optional
 from agents.base import BaseAgent
 from models.jd import JD
 from models.resume import Resume
-from models.question import Question, JudgeResult, Difficulty, RoundRecord
+from models.question import Question, JudgeResult, Difficulty
 from models.llm import LLM
-from orchestration.matcher import rank_skills
 from prompts import load_prompt
 
 logger = logging.getLogger("agents.interviewer")
@@ -438,8 +437,3 @@ class InterviewerAgent(BaseAgent):
             )
         except Exception:
             pass
-
-    @staticmethod
-    def rank_skills(jd: JD, resume: Resume) -> list[dict]:
-        """委托给 orchestration.matcher.rank_skills"""
-        return rank_skills(jd, resume)

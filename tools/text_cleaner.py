@@ -27,21 +27,3 @@ def clean_text(text: str) -> str:
     text = text.strip()
 
     return text
-
-
-def truncate(text: str, max_chars: int = 8000) -> str:
-    """截断文本到指定长度，在最后一个完整句子处截断"""
-    if len(text) <= max_chars:
-        return text
-
-    truncated = text[:max_chars]
-    # 找最后一个句号/换行处截断
-    last_end = max(
-        truncated.rfind("。"),
-        truncated.rfind("\n"),
-        truncated.rfind(". "),
-    )
-    if last_end > max_chars // 2:
-        truncated = truncated[: last_end + 1]
-
-    return truncated + "\n\n[文本已截断，超出 token 限制]"

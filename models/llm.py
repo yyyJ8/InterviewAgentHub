@@ -73,22 +73,3 @@ class LLM:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield delta.content
-
-    async def generate_with_messages(
-        self,
-        messages: list[dict],
-        stream: bool = False,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> str | AsyncIterator[str]:
-        """直接传入完整消息列表（用于多轮对话历史）"""
-        response = await self.client.chat.completions.create(
-            model=config.llm_model,
-            messages=messages,
-            temperature=temperature or config.llm_temperature,
-            max_tokens=max_tokens or config.llm_max_tokens,
-            stream=stream,
-        )
-        if stream:
-            return self._stream_handler(response)
-        return response.choices[0].message.content or ""

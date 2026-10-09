@@ -33,11 +33,6 @@ INTERVIEW_SESSIONS_SUFFIX = "interview_sessions"
 COLLECTION_QUESTION_BANK = f"{config.chroma_collection_prefix}{QUESTION_BANK_SUFFIX}"
 COLLECTION_INTERVIEW_SESSIONS = f"{config.chroma_collection_prefix}{INTERVIEW_SESSIONS_SUFFIX}"
 
-ALL_COLLECTIONS = [
-    COLLECTION_QUESTION_BANK,
-    COLLECTION_INTERVIEW_SESSIONS,
-]
-
 
 # ── Embedding 提供者 ───────────────────────────────────────
 

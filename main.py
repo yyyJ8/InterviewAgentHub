@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.text import Text
 
 # 抑制 httpx/anyio 在事件循环关闭后的清理噪音
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
