@@ -253,7 +253,7 @@ LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 ├── models/              # Pydantic 数据模型
 ├── tools/               # PDF / DOCX / TXT 文件解析
 ├── prompts/             # 7 个 Prompt 模板（变量校验）
-├── data/                # 种子题库 + Demo 数据 + 运行时数据
+├── data/                # 种子题库（随面试沉淀增长）+ 运行时数据
 ├── docs/                # 项目文档 + 优化路线图
 ├── tests/               # 单元测试 + fixtures
 ├── config.py            # 全局配置（dataclass 单例）
@@ -269,23 +269,9 @@ LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
 | Phase 1 | MCP Server + 基础 Agent + 简单问答 | ✅ |
 | Phase 2 | 多轮面试 + 追问策略 + 反馈报告 | ✅ |
 | Phase 3 | MCP Gateway + ChromaDB 长期记忆 | ✅ |
-| Phase 4 | Gradio Web UI + 工程化 + Demo 数据 | ✅ |
+| Phase 4 | Gradio Web UI + 工程化 | ✅ |
 | Phase 5 | 原生 async + 统一状态机 + 流式出题 + 环境区分 + bge-m3 Embedding（SiliconFlow API） | ✅ |
-
-> 下一步详见 [docs/optimization-roadmap.md](docs/optimization-roadmap.md)
-
----
-
-## Demo
-
-```bash
-# Demo 数据位于 data/demo/
-├── Agent开发实习生_JD.txt   # 岗位 JD（Agent 开发实习）
-├── Java开发实习生_JD.txt    # 岗位 JD（Java 开发实习）
-├── 张明远_简历.txt          # 候选人 A（履历型，TXT）
-├── 江豪-后端.pdf            # 候选人 B（实战型，PDF）
-└── DEMO_剧本.md             # 演示流程 + 预设回答
-```
+| Phase 6 | MCP Streamable HTTP 协议端点 + 题库沉淀链路 | ✅ |
 
 ---
 
@@ -300,6 +286,5 @@ pytest tests/ --cov       # 带覆盖率
 
 ## 文档
 
-- [CLAUDE.md](docs/CLAUDE.md) — 项目总览 + 技术栈 + 开发阶段
-- [blog-ai-interviewer.md](docs/blog-ai-interviewer.md) — 全栈实战文章（对外展示）
-- [optimization-roadmap.md](docs/optimization-roadmap.md) — 优化升级方案 + 远期路线图
+- [技术手册.md](docs/技术手册.md) — 全栈实现手册（数据模型 → 编排 → MCP → UI 的完整细节）
+- [结构化系统设计-完整版.md](docs/结构化系统设计-完整版.md) — 数据流视角的系统设计（E-R 图 / 表设计 / PAD 图 / UI 状态图）
