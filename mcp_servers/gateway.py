@@ -70,12 +70,25 @@ class _SuppressMcpTransportNoise(logging.Filter):
         return not ("ClosedResourceError" in message and _MCP_NOISE_SIGNATURE in message)
 
 
+# 需要挂过滤器的日志器。这两条 traceback 来自**两个不同的 logger**，
+# 必须同时覆盖，只挂一个只能拦住一半：
+#   ① mcp.server.streamable_http —— 库自己 logger.exception("Error handling POST request")
+#      （见 mcp/server/streamable_http.py 的 `logger = logging.getLogger(__name__)`）
+#   ② uvicorn.error —— 二次异常冒泡到 ASGI 后由 uvicorn 打印
+_NOISE_FILTER_LOGGERS = ("mcp.server.streamable_http", "uvicorn.error")
+
+
 def install_mcp_noise_filter() -> None:
-    """把噪音过滤器挂到 uvicorn 的错误日志器上（幂等）。"""
-    target = logging.getLogger("uvicorn.error")
-    if not any(isinstance(f, _SuppressMcpTransportNoise) for f in target.filters):
-        target.addFilter(_SuppressMcpTransportNoise())
-        logger.debug("已安装 MCP 传输层噪音过滤器")
+    """把噪音过滤器挂到所有相关日志器上（幂等）。
+
+    uvicorn 通过 disable_existing_loggers=False 预先创建了日志器，
+    因此这里 addFilter 能直接生效。
+    """
+    for name in _NOISE_FILTER_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(isinstance(f, _SuppressMcpTransportNoise) for f in target.filters):
+            target.addFilter(_SuppressMcpTransportNoise())
+    logger.debug("已安装 MCP 传输层噪音过滤器: %s", _NOISE_FILTER_LOGGERS)
 
 
 # ═══════════════════════════════════════════════════════════
