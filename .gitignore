@@ -24,7 +24,9 @@ Thumbs.db
 # Logs & Uploads & Runtime data
 logs/
 uploads/
-data/chroma/
+# 运行时产物：ChromaDB 向量库（含测试库如 data/chroma_test）与面试会话记录。
+# 注意 data/demo/ 与 data/seed_questions.json 是随仓库分发的资料，不在此列。
+data/chroma*/
 data/sessions/
 
 # Docker (future — files will be tracked when created)
