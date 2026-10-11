@@ -110,6 +110,7 @@ class _LocalEmbedder:
                 break
             except Exception as e:  # noqa: BLE001 - 逐个 endpoint 尝试
                 last_error = e
+                logger.debug("本地 Embedding 从 %s 加载失败: %s", endpoint, e)
         else:
             raise RuntimeError(f"本地 Embedding 模型加载失败: {last_error}")
 
@@ -280,15 +281,16 @@ class VectorStore:
         """获取或创建 Collection。"""
         try:
             return self._client.get_or_create_collection(name)
-        except Exception:
+        except Exception as e:  # noqa: BLE001 - 退化到显式创建
+            logger.debug("get_or_create_collection(%s) 失败，改为 create: %s", name, e)
             return self._client.create_collection(name)
 
     def _reset_collection(self, name: str):
         """删除并重建 Collection（换 Embedding 模型导致维度变化时使用）。"""
         try:
             self._client.delete_collection(name)
-        except Exception:  # noqa: BLE001 - 不存在时忽略
-            pass
+        except Exception as e:  # noqa: BLE001 - 不存在时忽略
+            logger.debug("删除 Collection [%s] 失败（可能本就不存在）: %s", name, e)
         logger.warning(
             "已重建 Collection [%s]：Embedding 模型变更导致维度不兼容，旧向量已丢弃",
             name,

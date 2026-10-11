@@ -379,29 +379,62 @@ class InterviewerAgent(BaseAgent):
         }
 
     def _get_similar_questions_hint(self, skill: str, n: int = 3) -> str:
-        """从历史题库检索相似题目，作为出题参考提示。静默失败。"""
-        try:
-            from memory.vector_store import VectorStore
-            from config import config
+        """汇总出题参考提示，来自**两个独立来源**：
 
-            if not config.use_vector_memory:
-                return ""
-            vs = VectorStore()
-            if not vs.available:
-                return ""
-            results = vs.search_similar_questions(skill, n=n)
-            if not results:
-                return ""
-            hints = []
-            for r in results:
-                doc = r.get("document", "")
-                if doc:
-                    hints.append(f"  - {doc[:200]}")
-            if hints:
-                return "\n历史类似题目参考（避免重复，可借鉴风格）：\n" + "\n".join(hints)
-        except Exception:
-            pass
-        return ""
+        1. 向量库 `ih_question_bank` —— 过往面试中已出过的题（语义检索）
+        2. 种子题库 `seed_questions.json` —— 人工维护 + 面试沉淀的题（按技能匹配）
+
+        两者职责不同、此前只查了前者，导致沉淀进题库的题对出题环节毫无帮助
+        （"只写不读"）。此处合并，并附上题库题的作答要点作为质量参考。
+
+        任一来源失败都不影响出题（降级为无参考），但会记录日志而非静默吞掉。
+        """
+        sections: list[str] = []
+
+        # ── 来源 1：向量库中已出过的题 ──
+        try:
+            from config import config
+            from memory.vector_store import VectorStore
+
+            if config.use_vector_memory:
+                vs = VectorStore()
+                if vs.available:
+                    asked = [
+                        r.get("document", "")
+                        for r in vs.search_similar_questions(skill, n=n)
+                        if r.get("document")
+                    ]
+                    if asked:
+                        lines = "\n".join(f"  - {d[:200]}" for d in asked)
+                        sections.append(
+                            "历史已出过的题（同一道不要重复问，可换角度）：\n" + lines
+                        )
+        except Exception as e:  # noqa: BLE001 - 参考信息失败不应影响出题
+            logger.warning("检索历史已出题目失败（跳过该来源）: %s", e)
+
+        # ── 来源 2：种子题库中同技能的题 ──
+        try:
+            from mcp_servers.question_bank_server import find_seed_by_skill
+
+            seed_items = find_seed_by_skill(skill, limit=n)
+            if seed_items:
+                lines = []
+                for q in seed_items:
+                    line = f"  - {q.get('content', '')[:200]}"
+                    points = q.get("expected_answer_points") or []
+                    if points:
+                        line += "\n      参考考察点：" + "；".join(str(p) for p in points[:3])
+                    lines.append(line)
+                sections.append(
+                    "题库中已有的同技能题（优先复用其考察角度，也可据此加深）：\n"
+                    + "\n".join(lines)
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("检索种子题库失败（跳过该来源）: %s", e)
+
+        if not sections:
+            return ""
+        return "\n\n" + "\n\n".join(sections)
 
     def _get_candidate_history_hint(self, candidate_name: str) -> str:
         """查询候选人历史面试记录，返回 Prompt 摘要。静默失败。"""

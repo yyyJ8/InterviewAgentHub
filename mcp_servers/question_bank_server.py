@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 from pathlib import Path
@@ -11,6 +12,8 @@ from models.jd import JD
 from models.question import Question
 from agents.interviewer import InterviewerAgent
 from models.llm import LLM
+
+logger = logging.getLogger("mcp.question_bank")
 
 app = FastMCP("question-bank-server")
 
@@ -26,19 +29,40 @@ def _get_agent() -> InterviewerAgent:
     return _agent
 
 
+class SeedBankCorruptedError(RuntimeError):
+    """种子题库文件存在但无法解析。
+
+    刻意与"文件不存在（返回空列表）"区分：如果损坏时也返回空列表，
+    promote_questions 会把整个题库覆盖成只剩本次新增的题，导致原有数据全丢。
+    因此破坏性写入路径必须能在这种情况下中止。
+    """
+
+
 def _load_seed(reload: bool = False) -> list[dict]:
     """加载种子题库。
 
     Args:
         reload: True 时强制从文件重新读取（CLI 与面试流程可能分别写同一文件，
                 缓存在多写入方场景下会过期）。
+
+    Raises:
+        SeedBankCorruptedError: 文件存在但内容无法解析为 JSON 列表。
     """
     global _seed_cache
     if _seed_cache is None or reload:
-        if _SEED_PATH.exists():
-            _seed_cache = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
-        else:
+        if not _SEED_PATH.exists():
             _seed_cache = []
+        else:
+            try:
+                data = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                logger.error("种子题库无法解析 %s: %s", _SEED_PATH, e)
+                raise SeedBankCorruptedError(f"{_SEED_PATH} 解析失败: {e}") from e
+            if not isinstance(data, list):
+                raise SeedBankCorruptedError(
+                    f"{_SEED_PATH} 顶层应为 JSON 数组，实际是 {type(data).__name__}"
+                )
+            _seed_cache = data
     return _seed_cache
 
 
@@ -105,7 +129,15 @@ def promote_questions(questions: list[dict], limit: int = 10) -> dict:
         统计信息 {"added": int, "skipped_duplicate": int, "skipped_quality": int,
                  "reasons": [...], "total": int}
     """
-    seed = _load_seed(reload=True)
+    try:
+        seed = _load_seed(reload=True)
+    except SeedBankCorruptedError as e:
+        # 拒绝在读到损坏文件时写入：否则会把整个题库覆盖成只剩本次新增的题
+        logger.error("题库文件损坏，已中止沉淀以避免覆盖原有数据: %s", e)
+        return {
+            "added": 0, "skipped_duplicate": 0, "skipped_quality": 0,
+            "reasons": [f"题库文件损坏，已中止: {e}"], "total": 0, "aborted": True,
+        }
     existing = {_normalize(q.get("content", "")) for q in seed}
 
     stats = {"added": 0, "skipped_duplicate": 0, "skipped_quality": 0, "reasons": []}
@@ -143,7 +175,11 @@ def promote_questions(questions: list[dict], limit: int = 10) -> dict:
         _save_seed(seed)
         stats["added"] = len(added)
 
-    stats["total"] = len(_load_seed(reload=True))
+    try:
+        stats["total"] = len(_load_seed(reload=True))
+    except SeedBankCorruptedError:
+        # 理论上不会走到（写入前已校验过），兜底避免统计失败影响返回值
+        stats["total"] = -1
     return stats
 
 
@@ -187,6 +223,36 @@ async def generate_questions(
         return json.dumps(questions, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+def find_seed_by_skill(skill: str, limit: int = 3) -> list[dict]:
+    """按技能名从种子题库取题（供出题时参考）。
+
+    匹配规则：技能名归一化后相等，或互为子串（如 "MySQL" 与 "MySQL/SQL"）。
+    返回至多 limit 条，优先返回带作答要点的（质量更高）。
+
+    Args:
+        skill: 目标技能名
+        limit: 最多返回条数
+
+    Returns:
+        题目 dict 列表（同一份题库对象，调用方不应就地修改）
+    """
+    if not skill or not str(skill).strip():
+        return []
+
+    target = _normalize(skill)
+    matched = []
+    for q in _load_seed():
+        q_skill = _normalize(q.get("skill", ""))
+        if not q_skill:
+            continue
+        if q_skill == target or q_skill in target or target in q_skill:
+            matched.append(q)
+
+    # 带作答要点的排前面（信息量更大，更利于 LLM 参考考察角度）
+    matched.sort(key=lambda q: -len(q.get("expected_answer_points") or []))
+    return matched[:max(1, limit)]
 
 
 @app.tool()
@@ -244,7 +310,8 @@ def add_to_seed_bank(question_json: str) -> bool:
         seed.append(question.model_dump())
         _save_seed(seed)
         return True
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - MCP 工具需返回 bool 而非抛出
+        logger.warning("题目写入种子题库失败: %s", e)
         return False
 
 
