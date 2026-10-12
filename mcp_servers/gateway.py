@@ -37,6 +37,7 @@ from models.interview import InterviewState, InterviewStatus
 logger = logging.getLogger("gateway")
 
 # 单一版本来源，避免多处取值不一致
+# 改动此值时会一并更新 docs/技术手册.md 页脚的版本号
 VERSION = "0.5.0"
 
 
