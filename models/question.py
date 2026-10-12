@@ -36,7 +36,7 @@ class JudgeResult(BaseModel):
 
 
 class RoundRecord(BaseModel):
-    """单轮面试记录（用于 LangGraph state 积累）"""
+    """单轮面试记录（用于编排层状态积累）"""
     round_number: int
     skill: str
     question: Question

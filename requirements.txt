@@ -2,8 +2,10 @@
 openai>=1.30.0
 
 # Orchestration
-langgraph>=0.2.0
-langgraph-checkpoint>=0.1.0
+# 说明：编排为自研状态机（LangGraph 风格的节点函数 + 显式条件路由），
+# 不依赖 langgraph。历史原因见 docs/技术手册.md「架构演进」一节。
+# 若将来需要「批量跑完整场面试」或「执行历史回放」，可再引入
+# langgraph>=1.0（参考 git 8aa2cbc 的实现）。
 
 # MCP Protocol
 # >=1.10 是硬性要求：MCP 协议端点依赖 FastMCP.streamable_http_app()、

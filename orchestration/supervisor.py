@@ -1,17 +1,30 @@
-"""多轮面试编排 — LangGraph StateGraph
+"""多轮面试编排 — 自研状态机
 
-节点：parse_jd → parse_resume → match_skills → generate_question
-      → judge_answer → decide_next（唯一条件边）
+节点（纯函数式，输入状态、返回增量）：
+    parse_jd → parse_resume → match_skills → generate_question
+             → judge_answer → decide_next（条件路由）
+
+**为什么不使用 LangGraph 的图执行**（架构决策，详见 docs/技术手册.md「架构演进」）：
+
+本项目的交互模型是「一次 HTTP 请求 = 一轮面试」，答案要等用户提交、状态要跨进程
+持久化。而 LangGraph 的执行模型是「一次 invoke 跑完整个流程，需要输入处用
+interrupt 挂起」。实测结论：
+
+  - 单次 Command(resume=...) 会让图继续按边流转（实测一次就推进了 3 轮）
+  - 设置多个挂起点时，resume 值会被错误的挂起点消费
+  - 默认检查点 MemorySaver 是进程内内存，无法跨请求/重启存活
+
+因此这里**只沿用 LangGraph 的状态类型约定（TypedDict）与节点函数式设计**，
+去掉图的调度与检查点：由调用方（Gateway）按请求逐轮直接调用节点函数，
+状态持久化交给 memory/session_store.py。
+
+注意：状态合并是**显式**的（调用方 state.update(node 返回值)）。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Optional, TypedDict
-from operator import add
-
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from typing import Optional, TypedDict
 
 from models.jd import JD
 from models.resume import Resume
@@ -29,7 +42,7 @@ logger = logging.getLogger("supervisor")
 # ── State ─────────────────────────────────────────────
 
 class InterviewState(TypedDict):
-    """面试状态 — LangGraph 多轮版"""
+    """面试状态 — 自研状态机多轮版"""
     # 会话标识（必须持久化，否则长期记忆钩子读不到候选人）
     interview_id: str
     candidate_name: str
@@ -51,8 +64,10 @@ class InterviewState(TypedDict):
     ordered_skills: list[dict]
     current_skill_index: int
 
-    # 多轮面试
-    rounds: Annotated[list[RoundRecord], add]  # 积累的面试轮次
+    # 多轮面试。注意：这里刻意不用 Annotated[..., add] —— reducer 只在
+    # LangGraph 图合并状态时生效；本项目不走图，累加由调用方显式完成
+    # （judge_and_decide 中 state.update(节点返回值)）。
+    rounds: list[RoundRecord]
     current_round_number: int
     question: Optional[Question]
     answer: str
@@ -325,51 +340,10 @@ async def decide_next_node(state: InterviewState) -> dict:
     return result
 
 
-# ── 条件路由 ─────────────────────────────────────────
-
-def decide_routing(state: InterviewState) -> str:
-    """路由判断：继续循环还是结束"""
-    if state.get("terminated") or state.get("error"):
-        return "end"
-    return "continue"
-
-
-# ── 构建图 ───────────────────────────────────────────
-
-def build_interview_graph():
-    """构建多轮面试流程图（6 节点 + 1 条件边）。"""
-    builder = StateGraph(InterviewState)
-
-    # 注册节点
-    builder.add_node("parse_jd", parse_jd_node)
-    builder.add_node("parse_resume", parse_resume_node)
-    builder.add_node("match_skills", match_skills_node)
-    builder.add_node("generate_question", generate_question_node)
-    builder.add_node("judge_answer", judge_answer_node)
-    builder.add_node("decide_next", decide_next_node)
-
-    # 入口 → 解析
-    builder.set_entry_point("parse_jd")
-    builder.add_edge("parse_jd", "parse_resume")
-    builder.add_edge("parse_resume", "match_skills")
-
-    # 匹配 → 出题 → 评判 → 决策
-    builder.add_edge("match_skills", "generate_question")
-    builder.add_edge("generate_question", "judge_answer")
-    builder.add_edge("judge_answer", "decide_next")
-
-    # 条件循环：继续 → 回到出题；结束 → END
-    builder.add_conditional_edges(
-        "decide_next",
-        decide_routing,
-        {"continue": "generate_question", "end": END},
-    )
-
-    # 编译（带 MemorySaver 检查点）
-    return builder.compile(checkpointer=MemorySaver())
-
-
-interview_graph = build_interview_graph()
+# 说明：这里原先定义过 LangGraph 的图（build_interview_graph / interview_graph）
+# 与它的条件路由函数 decide_routing。二者均已删除 —— 图从未被调用（真实链路按
+# 请求逐轮直接调用节点函数），保留会误导读者以为存在图调度。
+# 需要参考当时的实现：git show 8aa2cbc:orchestration/supervisor.py
 
 
 # ── 交互式帮助函数（供 Web UI 使用） ─────────────────

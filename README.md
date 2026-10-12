@@ -1,14 +1,14 @@
 # 🎯 AI 面试官
 
-基于 **LangGraph + FastAPI + MCP + ChromaDB** 的多 Agent 面试系统。
+基于 **FastAPI + MCP + ChromaDB** 的多 Agent 面试系统，编排为自研状态机。
 
 > 上传 JD + 简历 → AI 解析匹配 → 多轮追问面试 → 五维度评分报告，完整闭环。
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python)](https://www.python.org/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-blue)](https://langchain-ai.github.io/langgraph/)
 [![Gradio](https://img.shields.io/badge/Gradio-5.0+-orange?logo=gradio)](https://www.gradio.app/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-0.5+-brightgreen)](https://www.trychroma.com/)
+[![MCP](https://img.shields.io/badge/MCP-1.10+-purple)](https://modelcontextprotocol.io/)
 
 ---
 
@@ -39,7 +39,7 @@ Embedding 默认走 SiliconFlow 的 `BAAI/bge-m3`（免费），无需下载模�
                   │
            MCP 聚合层 ── 3 个 Server 的 6 个工具 → 单一 MCP 端点
                   │
-           orchestration/supervisor（LangGraph StateGraph）
+           orchestration/supervisor（自研状态机：节点函数 + 显式条件路由）
            ├── Agent 层：JD 解析 / 简历分析 / 面试官（多轮追问）/ 反馈
            └── 匹配层：matcher.py（规则排序 + bge-m3 语义检索）
                   │
@@ -53,7 +53,7 @@ Embedding 默认走 SiliconFlow 的 `BAAI/bge-m3`（免费），无需下载模�
 | 层级 | 技术 | 说明 |
 |------|------|------|
 | LLM | deepseek-flash（DeepSeek-V4.1-Flash） | OpenAI 兼容 API，指数退避重试 + 流式输出 |
-| 编排 | LangGraph | StateGraph + 条件边 + MemorySaver Checkpoint |
+| 编排 | **自研状态机** | 6 个节点函数 + 显式条件路由；按请求逐轮推进，状态存 JSON |
 | Embedding | BAAI/bge-m3 | 1024 维，SiliconFlow API（免费） |
 | 向量库 | ChromaDB | 本地持久化，2 个 Collection，优雅降级 |
 | 后端 | FastAPI | Gateway + REST API + MCP Streamable HTTP |
@@ -61,6 +61,12 @@ Embedding 默认走 SiliconFlow 的 `BAAI/bge-m3`（免费），无需下载模�
 | MCP | FastMCP SDK | 3 个独立 Server，聚合为单一 MCP 端点 |
 | 文件解析 | pdfplumber + python-docx | PDF/DOCX/TXT 全格式 |
 | 存储 | JSON | 会话持久化，每场面试一个文件 |
+
+> **关于编排**：项目曾用 LangGraph 的 `StateGraph` 编排（阶段一，批处理模式可跑通）。
+> 改为多轮交互后，其「一次 invoke 跑完流程 + interrupt 挂起」的执行模型与本项目
+> 「一次 HTTP 请求 = 一轮、状态跨进程」的需求不匹配（实测细节见
+> [技术手册](docs/技术手册.md)「架构演进」）。现保留其状态类型与节点函数式设计，
+> 调度与持久化自研。
 
 ---
 
@@ -161,7 +167,7 @@ LOG_LEVEL=INFO
 
 ```
 ├── agents/              # 4 个 Agent（JD / 简历 / 面试官 / 反馈）
-├── orchestration/       # LangGraph 编排（supervisor.py + matcher.py）
+├── orchestration/       # 自研状态机编排（supervisor.py + matcher.py）
 ├── mcp_servers/         # 3 个 MCP Server + Gateway + 聚合层
 ├── memory/              # 会话持久化（JSON）+ 向量库（ChromaDB）
 ├── web/                 # Gradio UI
