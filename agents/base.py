@@ -42,7 +42,8 @@ class BaseAgent:
             response_model: 期望的 Pydantic 模型类
             system_prompt: 可覆盖默认 system prompt
             max_retries: 最大重试次数（不含首次调用）
-            backoff_base: 退避基数秒，实际延迟 = base * 2^attempt
+            backoff_base: 退避基数秒。空响应路径延迟 = base * 3^attempt（1s → 3s → 9s）；
+                          解析失败路径延迟 = base * 2^attempt（1s → 2s → 4s）
 
         Returns:
             解析后的 Pydantic 模型实例
