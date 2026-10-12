@@ -41,7 +41,7 @@ Embedding 默认走 SiliconFlow 的 `BAAI/bge-m3`（免费），无需下载模�
                   │
            orchestration/supervisor（自研状态机：节点函数 + 显式条件路由）
            ├── Agent 层：JD 解析 / 简历分析 / 面试官（多轮追问）/ 反馈
-           └── 匹配层：matcher.py（规则排序 + bge-m3 语义检索）
+           └── 匹配层：matcher.py（规则字符串匹配 + 工具技能降权排序）
                   │
            记忆层：SessionStore（JSON）+ VectorStore（ChromaDB, 2 Collections）
 ```
